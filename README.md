@@ -59,4 +59,4 @@ dist/         Generated single-file bundle
 
 ## Acknowledgments
 
-Thanks to **uni/union/union3425** on Discord for providing the deobfuscated reference used during this recreation.
+Thanks to uni for making such an awesome script and community <3 
