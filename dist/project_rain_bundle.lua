@@ -47,6 +47,10 @@ local function base_require(name)
     error("Invalid module name: " .. tostring(name))
     end
 
+  if normalized:sub(1, 9) == "features/" then
+    normalized = "src/" .. normalized
+  end
+
     if module_cache[normalized] ~= nil then
         return module_cache[normalized]
     end
@@ -85,6 +89,39 @@ end
 
 require = base_require
 
+module_map["src/features/loader"] = [[
+return {
+    initialize = LPH_NO_VIRTUALIZE(function()
+        getgenv().Feature = require(("@src/features/generic_feature"));
+
+        local feature_count = 0;
+        local bad_modules = {} do
+            for _, item in list_modules("features/auto-parry/data/*") do
+                bad_modules[item] = true;
+            end
+
+            for _, item in list_modules("features/auto-parry/data/effects/*") do
+                bad_modules[item] = true;
+            end
+
+            bad_modules["features/auto-parry/handlers/animator-handler"] = true;
+        end
+
+        for _, module in list_modules("features/*/*") do
+            if bad_modules[module] then
+                continue;
+            end
+
+            feature_count += 1;
+
+            local feature = require(module);
+            if feature and typeof(feature) == "table" and feature.id then
+                aztup.features[feature.id] = feature;
+            end
+        end;
+    end);
+}
+]];
 module_map["src/automation/exit_ui"] = [[
 if getgenv().added_exit_ui then 
     pcall(function() 
@@ -12812,6 +12849,10239 @@ return Feature:new("auto_loot", services.RunService.RenderStepped, function()
         auto_loot:main()
     end)
 end)]];
+module_map["src/features/auto-parry/auto-parry"] = [[
+local DefendActionManager = require("@src/features/auto-parry/defend-action-manager")
+getgenv().DefendActionManager = DefendActionManager
+getgenv().Latency = require("@src/utility/latency")
+
+local function checkRange(obj, rangeCheck)
+	if not (obj and obj.Position and local_player and local_player.root_part) then
+		return false, math.huge
+	end
+	local distance = (obj.Position - local_player.root_part.Position).Magnitude
+	return distance <= rangeCheck, distance
+end
+
+local function checkRangeFromPing(obj, rangeCheck, speed)
+	if not (obj and obj.Position and local_player and local_player.root_part) then
+		return false, math.huge, 0
+	end
+	local distance = (obj.Position - local_player.root_part.Position).Magnitude
+	local ping = (Latency and Latency.get_ping and Latency:get_ping()) or 0
+	distance -= (speed or 0) * (ping * 2)
+	return distance <= rangeCheck, distance, (speed and speed ~= 0) and (ping / speed) or 0
+end
+
+local last_parry_at = tick()
+
+local thrown = workspace:FindFirstChild("Thrown") or workspace:WaitForChild("Thrown", 10)
+if thrown then
+	aztup.maid:give_task(thrown.ChildAdded:Connect(LPH_NO_VIRTUALIZE(function(part)
+		if not (aztup and aztup.flags and aztup.flags.auto_parry) then
+			return
+		end
+		if not (part and part.Parent and local_player and local_player.root_part) then
+			return
+		end
+
+		local live = workspace:FindFirstChild("Live")
+		if not live then
+			return
+		end
+
+		if part.Name == "ArdourBall2" then
+			local nomad
+			for _, child in live:GetChildren() do
+				if child.Name:match("nomad") then
+					nomad = child
+					break
+				end
+			end
+
+			if not nomad then
+				return
+			end
+			local cond = false
+			repeat
+				task.wait()
+				local pos_delta = (part.Position - local_player.root_part.Position)
+
+				if
+					math.abs(pos_delta.X) < 15
+					and math.abs(pos_delta.Y) < 15
+					and math.abs(pos_delta.Z) < 15
+					and tick() - last_parry_at >= 0.1
+				then
+					cond = true
+				elseif not part.Parent then
+					cond = true
+					return
+				end
+			until cond
+			if not part.Parent then
+				return
+			end
+
+			general:generic_parry_ap_task(nomad)
+		elseif part.Name == "SlotBall" then
+			repeat
+				task.wait()
+			until not part.Parent or (part.Position - local_player.root_part.Position).Magnitude < 20
+			if not part.Parent then
+				return
+			end
+
+			local current_angel
+			for _, angel in live:GetChildren() do
+				if angel.Name:match(".angel") then
+					current_angel = angel
+					break
+				end
+			end
+
+			general:generic_parry_ap_task(current_angel)
+		elseif part.Name == "BoneSpear" then
+			local has_bonekeeper, bk
+			for _, child in live:GetChildren() do
+				if child.Name:match("boneboy") then
+					has_bonekeeper = true
+					bk = child
+					break
+				end
+			end
+
+			if has_bonekeeper then
+				task.wait(2.15)
+			end
+
+			repeat
+				task.wait()
+			until not part.Parent
+				or (part.Position - local_player.root_part.Position).Magnitude
+					< (workspace:FindFirstChild("Layer2Floor1") and 30 or 75)
+			if not part.Parent then
+				return
+			end
+
+			if not workspace:FindFirstChild("Layer2Floor1") then
+				local w = 0.2 - ((Latency and Latency.get_ping and Latency:get_ping()) or 0)
+				if w > 0 then
+					task.wait(w)
+				end
+			end
+
+			general:generic_parry_ap_task(bk or workspace.Live:GetChildren()[2])
+		elseif part.Name == "Flamewalker" and aztup.flags.no_rosen_fire then
+			part.CanTouch = false
+
+			local touch = part:WaitForChild("TouchInterest", 3.5)
+			if touch then
+				services.Debris:AddItem(touch, 0)
+			end
+		elseif part.Name == "Cyclone" then
+			local backpack = local_player.instance:FindFirstChild("Backpack")
+			if not backpack then
+				return
+			end
+			if backpack:FindFirstChild("Mantra:EruptionBlood{{Scarlet Cyclone}}") then
+				return
+			end
+
+			local user
+			for _, player in services.Players:GetPlayers() do
+				if
+					player:FindFirstChild("Backpack")
+					and player.Backpack:FindFirstChild("Mantra:EruptionBlood{{Scarlet Cyclone}}", true)
+				then
+					user = player.Character
+					break
+				end
+			end
+
+			if not user then
+				return
+			end
+
+			repeat
+				task.wait()
+				local pos_delta = (part.Position - local_player.root_part.Position)
+
+				if math.abs(pos_delta.X) < 12 and math.abs(pos_delta.Y) < 15 and math.abs(pos_delta.Z) < 12 then
+					general:generic_parry_ap_task(user)
+					break
+				end
+			until not part.Parent
+		elseif part.Name:find("AraneaProjectile") or part.Name:find("SuperArrow") then
+			local allowed_targets = aztup_options.allowed_targets.Value
+			if not allowed_targets.PVP and not allowed_targets.All then
+				return
+			end
+
+			local name = part.Name:split("_")[2]
+			if not name then
+				return
+			end
+			local user = services.Players:FindFirstChild(name)
+			if not user then
+				return
+			end
+			if user == local_player.instance then
+				return
+			end
+
+			repeat
+				task.wait()
+				local pos_delta = (part.Position - local_player.root_part.Position)
+
+				if math.abs(pos_delta.X) < 12 and math.abs(pos_delta.Y) < 15 and math.abs(pos_delta.Z) < 12 then
+					general:generic_parry_ap_task(user.Character)
+					break
+				end
+			until not part.Parent
+		elseif part.Name:find("ShadeArrow") then
+			local allowed_targets = aztup_options.allowed_targets.Value
+			if not allowed_targets.PVP and not allowed_targets.All then
+				return
+			end
+
+			local name = part.Name:split("_")[2]
+			if not name then
+				return
+			end
+			local user = services.Players:FindFirstChild(name)
+			if not user then
+				return
+			end
+			if user == local_player.instance then
+				return
+			end
+
+			repeat
+				task.wait()
+				local pos_delta = (part.Position - local_player.root_part.Position)
+
+				if math.abs(pos_delta.X) < 15 and math.abs(pos_delta.Y) < 16 and math.abs(pos_delta.Z) < 15 then
+					general:generic_parry_ap_task(user.Character)
+					break
+				end
+			until not part.Parent
+		elseif part.Name == "Bullet" and not checkRange(part, 10) then
+			local closest_player
+			local closest_distance = math.huge
+			for _, char in workspace:WaitForChild("Live"):GetChildren() do
+				if char and char:FindFirstChild("HumanoidRootPart") then
+					local distance = (part.Position - char.HumanoidRootPart.Position).Magnitude
+					if distance < closest_distance then
+						closest_distance = distance
+						closest_player = char
+					end
+				end
+			end
+
+			if closest_distance > 120 then
+				return
+			end
+
+			repeat
+				task.wait()
+			until (checkRangeFromPing(part, 20, 20)) or not part.Parent
+			if not part.Parent then
+				return
+			end
+
+			if closest_player and closest_player ~= local_player.character then
+				general:generic_parry_ap_task(closest_player)
+			end
+		elseif part.Name == "SeekerOrb" then
+			local closest_player
+			local closest_distance = math.huge
+			for _, char in workspace:WaitForChild("Live"):GetChildren() do
+				if char and char:FindFirstChild("HumanoidRootPart") then
+					local distance = (part.Position - char.HumanoidRootPart.Position).Magnitude
+					if distance < closest_distance then
+						closest_distance = distance
+						closest_player = char
+					end
+				end
+			end
+
+			if closest_distance > 150 then
+				return
+			end
+
+			repeat
+				task.wait()
+			until (checkRange(part, 2)) or not part.Parent
+			if not part.Parent then
+				return
+			end
+
+			
+			local rocketPropulsion = part:WaitForChild('RocketPropulsion', 10)
+			if (not rocketPropulsion or rocketPropulsion.Target ~= local_player.root_part) then return end			
+			task.wait(0.3 - Latency:get_ping());
+
+			if closest_player and closest_player ~= local_player.character then
+				general:generic_parry_ap_task(closest_player)
+			end
+		end
+	end)))
+end
+
+local last_telegraph_attach = tick()
+
+function run_af()
+	if not aztup.flags.auto_feint then
+        return    
+end;
+
+    if not EffectReplicator:FindEffect("LightAttack") and not EffectReplicator:FindEffect("MidAttack") then
+        return    
+end;
+
+    if EffectReplicator:FindEffect("FeintCool") then
+        return    
+end;
+
+    
+
+    local character_handler = local_player.character:FindFirstChild("CharacterHandler");
+    local feint_release = character_handler and character_handler:FindFirstChild("FeintRelease", true);
+    local feint_click = KeyHandler:get_key("FeintClick");
+
+    if not feint_release or not feint_click then
+        return false    
+end;
+
+    feint_click:FireServer({
+        A = false,
+        Left = false,
+        S = false,
+        NOAERIALS = false,
+        Space = false,
+        Right = true,
+        W = false,
+        D = false
+    })
+    task.wait(0.05);
+    feint_release:FireServer({
+        A = false,
+        Left = false,
+        S = false,
+        NOAERIALS = false,
+        Space = false,
+        Right = false,
+        W = false,
+        D = false
+    })
+end;
+
+
+aztup.maid:give_task(workspace.DescendantAdded:Connect(LPH_NO_VIRTUALIZE(function(projectile)
+	if not (aztup and aztup.flags and aztup.flags.auto_parry) then
+		return
+	end
+
+	local allowed_targets = aztup_options.allowed_targets.Value
+	if not allowed_targets.PVE and not allowed_targets.All then
+		return
+	end
+
+	local live = workspace:FindFirstChild("Live")
+	if not live then
+		return
+	end
+	
+	if projectile.Name == "REP_SOUND_1590181673" and projectile:FindFirstAncestorWhichIsA("Model").Name == "MetalTurret" then
+		
+		
+		local closest_player
+		local closest_distance = math.huge
+		for _, char in workspace:WaitForChild("Live"):GetChildren() do
+			if char and char:FindFirstChild("HumanoidRootPart") then
+				local distance = (projectile.Parent.Position - char.HumanoidRootPart.Position).Magnitude
+				if distance < closest_distance then
+					closest_distance = distance
+					closest_player = char
+				end
+			end
+		end
+		local pos_delta = (projectile.Parent.Position - local_player.root_part.Position)
+		
+		if
+			not (
+				math.abs(pos_delta.X) < 10
+				and math.abs(pos_delta.Y) < 15
+				and math.abs(pos_delta.Z) < 50
+			)
+		then
+			return		
+end;
+		if closest_distance > 120 or not services.Players:GetPlayerFromCharacter(closest_player) or not services.Players:GetPlayerFromCharacter(closest_player).Backpack:FindFirstChild("Mantra:TurretMetal{{Metal Turret}}") then
+			return
+		end
+
+		if closest_player == local_player.character then return end
+
+		DefendActionManager:queue_generic_dodge_task(closest_player)
+	elseif projectile.Name == "ParticleEmitter3" and string.find(projectile:GetFullName(), "avatar") then
+		local sdelay = (Latency:get_ping() / 2)
+		task.wait(0.75 - sdelay)
+
+		local avatar = projectile.Parent.Parent.Parent
+		local target = avatar and avatar:FindFirstChild("Target")
+
+		if target and target.Value ~= local_player.character then
+			return
+		end
+
+		repeat
+			general:generic_parry_ap_task(avatar)
+			task.wait(0.15 - (Latency:get_ping() / 2))
+		until not projectile.Parent or not projectile.Enabled
+	elseif projectile.Name == "GrabPart" then
+		repeat
+			task.wait()
+		until not projectile.Parent or (projectile.Position - local_player.root_part.Position).Magnitude < 20
+		if not projectile.Parent then
+			return
+		end
+
+		local ethiron
+		for _, entity in workspace:WaitForChild("Live"):GetChildren() do
+			if entity.Name:match("avatar") then
+				ethiron = entity
+				break
+			end
+		end
+
+		DefendActionManager:queue_generic_dodge_task(ethiron)
+	elseif projectile.Name == "SpikeStabEff" then
+		local chaser
+		for _, entity in live:GetChildren() do
+			if not entity.Name:match(".chaser") then
+				continue
+			end
+			chaser = entity
+			break
+		end
+
+		if not chaser then
+			return
+		end
+
+		BlockInputManager:add_task("SpikeStabEff", chaser, nil, 2000):debris(0.6)
+		run_af()
+		task.wait(0.6 - Latency:get_ping())
+		run_af()
+		if (projectile.Position - local_player.root_part.Position).Magnitude > 20 then
+			return
+		end
+
+		if aztup.flags.auto_parry_debug then
+			Library:Notify("[SpikeStabEff] Performing action 1: Parry")
+		end
+		DefendActionManager:queue_generic_parry_task(chaser)
+	elseif projectile.Name == "HitTendril" then
+		local chaser
+		for _, entity in live:GetChildren() do
+			if not entity.Name:match(".chaser") then
+				continue
+			end
+			chaser = entity
+			break
+		end
+
+		if not chaser then
+			return
+		end
+
+		local hrp = chaser:FindFirstChild("HumanoidRootPart")
+		if not hrp then
+			return
+		end
+
+		local hasTelegraph = projectile.Parent == hrp or hrp:FindFirstChild("TelegraphAttach") ~= nil
+
+		if hasTelegraph then
+			run_af()
+			task.wait(0.585 - Latency:get_ping())
+			run_af()
+			if aztup.flags.auto_parry_debug then
+				Library:Notify("[HitTendril] Performing action 1: Dodge")
+			end
+			DefendActionManager:queue_generic_dodge_task(chaser)
+		else
+			run_af()
+			task.wait(0.600 - Latency:get_ping())
+			run_af()
+
+			if aztup.flags.auto_parry_debug then
+				Library:Notify("[HitTendril] Performing action 1: Parry")
+			end
+			DefendActionManager:queue_generic_parry_task(chaser)
+		end
+	end
+end)))
+
+return nil
+]];
+module_map["src/features/auto-parry/block-input-manager"] = [[
+local BlockInputManagerClass = {};
+function BlockInputManagerClass.new()
+    local self = setmetatable({}, {
+        __index = BlockInputManagerClass
+    });
+    self.tasks = {};
+
+    function self:add_task(name, mob, box_func, range)
+        local block_input = aztup.flags.block_input;
+        if not block_input then return {debris=function()end,remove=function()end}end;
+
+        local allowed_targets = aztup_options.allowed_bi_targets.Value;
+
+        if mob.Name:sub(1, 1) == "." and not allowed_targets.PVE then
+            return {debris=function()end,remove=function()end}        
+end;
+
+        if mob.Name:sub(1, 1) ~= "." and not allowed_targets.PVP then
+            return {debris=function()end,remove=function()end}        
+end;
+
+        if not local_player.root_part or not mob:FindFirstChild("HumanoidRootPart") then
+            return {debris=function()end,remove=function()end}        
+end; 
+
+        local id = services.HttpService:GenerateGUID(false);
+        self.tasks[id] = {
+            name = name,
+            mob = mob,
+            range = range,
+            in_hitbox = box_func
+        };
+
+        return {
+            removed = false,
+            remove = function()
+                
+                
+                
+                
+        
+                self.removed = true;
+                self.tasks[id] = nil;
+            end,
+            debris = function(time, time2)
+                task.delay(typeof(time) == "table" and time2 - Latency:half_ping() or time - Latency:half_ping(), function()
+                    
+                    
+                    
+                    
+                    
+                    self.tasks[id] = nil;
+                end);
+            end
+        }
+    end
+
+    LPH_NO_VIRTUALIZE(function()
+        function self:should_block_input()
+            local should_block = false;
+            for index, task in self.tasks do
+                if not task.mob or not task.mob.Parent then
+                    self.tasks[index] = nil;
+                end;
+            
+                if task.mob then
+                    local mob_root = task.mob:FindFirstChild("HumanoidRootPart");
+                    if not mob_root then continue end
+                
+                    local distance = (local_player.root_part.Position - mob_root.Position).Magnitude;
+                    if task.range and distance > task.range or task.in_hitbox and not task.in_hitbox() then continue end
+                
+                    if not should_block then
+                        local block_input = aztup.flags.block_input;
+                        if not block_input then return {debris=function()end,remove=function()end}end;
+                        
+                        local allowed_targets = aztup_options.allowed_bi_targets.Value;
+                        should_block = allowed_targets.PVE and task.mob.Name:sub(1, 1) == "." or allowed_targets.PVP
+                    end;
+                end;
+            end;
+
+            return should_block        
+end;
+    end)();
+
+    return self
+end
+
+
+getgenv().BlockInputManager = BlockInputManagerClass.new();
+return getgenv().BlockInputManager]];
+module_map["src/features/auto-parry/data/action"] = [[
+local signal = require("@src/utility/signal")
+
+local actionCreator = {} do
+    function actionCreator.new(opts)
+        opts = opts or {}
+
+        local self
+        self = setmetatable({}, {
+            __index = actionCreator,
+            __newindex = function(_, k, v)
+                if k == "actions" or k == "pending_action" or k == "signal" or k == "_signal_enabled" or k == "cancelled" then
+                    rawset(self, k, v)
+                    return
+                elseif k == "when_ms" then
+                    rawset(self, "when", v / 1000);
+                    return                
+end
+                self.pending_action[k] = v
+            end
+        })
+
+        self.actions = {}
+        self.pending_action = {}
+        self.signal = signal.new()
+        self._signal_enabled = opts.signal == true
+        self.cancelled = false;
+
+        return self
+    end
+
+    function actionCreator:enable_signal(b)
+        self._signal_enabled = b == true
+        return self
+    end
+
+    function actionCreator:get_signal()
+        return self.signal
+    end
+
+    
+    function actionCreator:play()
+        local id = #self.actions + 1
+        self.actions[id] = self.pending_action
+        self.pending_action = {}
+
+        if self._signal_enabled then
+            self:get_signal():fire(id)
+        end
+
+        return self
+    end
+
+    
+    function actionCreator:push()
+        table.insert(self.actions, self.pending_action)
+        self.pending_action = {}
+        return self
+    end
+
+    function actionCreator:get()
+        return self.actions
+    end
+end
+
+return actionCreator]];
+module_map["src/features/auto-parry/data/base"] = [[
+local ht = services.HttpService; local jd = ht.JSONDecode; local tbl;
+local extra_data = LPH_NO_VIRTUALIZE(function() 
+    function decode_asset(asset)
+         local decoded = services.EncodingService:Base64Decode(buffer.fromstring(asset));
+         local decompress = services.EncodingService:DecompressBuffer(decoded, Enum.CompressionAlgorithm.Zstd);
+         return buffer.tostring(decompress)    
+end;
+    tbl = jd(ht, decode_asset(inline_asset_b96("@assets/base.json")));
+    return jd(ht, decode_asset(inline_asset_b96("@assets/extra_data.json")))
+end)()
+LPH_NO_VIRTUALIZE(function() for k,v in extra_data do tbl[k] = v end; end)();
+tbl['AbyssalRidge'] = (function() 
+return {
+    ids = {
+        "14912083756"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        action.when = 0.775;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(25, 25, 25);
+        action.type = "Parry"
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ArcBeam'] = (function() 
+return {
+    ids = {
+        "9481400792",
+        "9481398449"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        
+        local root = defender.entity:FindFirstChild("HumanoidRootPart");
+        if not root then return end
+
+        local aerial = not track.Animation.AnimationId:find("9481400792");
+
+        if not aerial then
+            local delta = local_player.root_part.Position - root.Position
+            local z_diff = delta:Dot(root.CFrame.LookVector);
+
+            action.when = z_diff >= 15 and (z_diff >= 30 and 0.5 or 0.4) or 0.225;
+            action.hitbox = Vector3.new(30, 60, 50)
+            action.offset = CFrame.new(0,0,-30);
+        else
+            local diff = self:distance();
+
+            action.when = diff >= 20 and (diff >= 35 and 0.6 or 0.5) or 0.35;
+            action.hitbox = Vector3.new(30, 60, 50)
+            action.offset = CFrame.new(0,0,0);
+        end
+        
+        
+        action.name = string.format("(%.2f) Arc Beam", self:distance())
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ArkasidJump'] = (function() 
+return {
+    ids = {
+        "99884262476386"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.65;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 20, 30);
+        action.name = "Arkasid Jump"
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ArkasidSleepSpin'] = (function() 
+
+return {
+    ids = {
+        "140594691648105"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.3;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 20, 20);
+        action.name = "Arkasid Sleep Spin 1"
+                
+        action:push();
+
+        action.when = 0.3 * 2;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 20, 30);
+        action.name = "Arkasid Sleep Spin 2"
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ArkasidSpin'] = (function() 
+return {
+    ids = {
+        "90936075863505"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.3;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 20, 20);
+        action.name = "Arkasid Spin 1"
+                
+        action:push();
+
+        action.when = 0.3 * 2;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 20, 20);
+        action.name = "Arkasid Spin 2"
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ArkasidSpit'] = (function() 
+return {
+    ids = {
+        "108989457380156"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.9;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(20, 30, 20);
+        action.name = "Arkasid Spit"
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['Ascension'] = (function() 
+return {
+    ids = {
+        "9461513613"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        action.when = math.min(50 + self:distance() * 10) / 1000;
+        action.type = "Dodge";
+        action.hitbox = Vector3.new(30, 60, 50)
+        action.offset = CFrame.new();
+        action.name = string.format("(%.2f) Ascension", self:distance())
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['AstralWind'] = (function() 
+return {
+    ids = {
+        "6470684331"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        task.delay(0.3 - Latency:get_ping(), function()
+            action.predict = true;
+            action.predict_time = 0.25;
+            action.base_and_predict = true;
+            action.detect_gale_feint = true;
+
+            action.when = 0;
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(40, 10, 40) + (Vector3.new(0, 0, 1) * math.clamp(defender.entity.HumanoidRootPart.Velocity.Magnitude, 0, 25));
+
+            action:play();
+        end)
+
+        return action    
+end    
+} 
+end)();
+tbl['Authority Flourish'] = (function() 
+return {
+    ids = {
+        "85186188251021"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "M1", 
+
+    run = function(action)
+        action.name = string.format("Authority Flourish %s - %s", weapon.length, weapon.type);
+        action.when = 0.3;
+        action.offset = CFrame.new(0, 0, -5)
+        action.hitbox = Vector3.one * weapon.length * 2.5;
+        action.shape = "ball";
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BellmarrowCrit'] = (function() 
+return {
+    ids = {
+        "139686454345909"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Critical", 
+
+    run = function(action)
+        action.when = 0.95
+        action.type = "Parry";
+        action.ignore_early_end = true;
+        action.hitbox = Vector3.new(80, 80, 80)
+        action.offset = CFrame.new();
+        action.name = "Bellmarrow Crit"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BlindingDawn'] = (function() 
+return {
+    ids = {
+        "10622235550"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true, 
+    action_type = "Spell", 
+
+    run = function(action) 
+        action.when = 0.5;
+        action.hitbox = Vector3.new(35, 20, 35);
+                
+        action:push();
+
+        local start = tick();
+        action.when = 0.5;
+        action.hitbox = Vector3.new(35, 20, 35);
+        action.type = "RPUE Parry";
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent and tick() - start <= 2        
+end;
+
+        action.wait = function()
+            task.wait(Latency:get_ping() / 2);
+        end
+
+        action.should = function()
+            return defender:in_hitbox(Vector3.new(35, 20, 35), CFrame.new(), true)        
+end;
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BloodEdge'] = (function() 
+return {
+    ids = {
+        "11493923277"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local root = defender.entity:FindFirstChild("HumanoidRootPart");
+        if not root then return end
+
+	    if root:WaitForChild("REP_SOUND_15776883341", 0.1) then
+            local delta = local_player.root_part.Position - root.Position
+            local z_diff = delta:Dot(root.CFrame.LookVector);
+            
+
+
+	    	action.when = z_diff >= 15 and 0.5 or 0.4
+	    	action.hitbox = Vector3.new(20, 20, 35)
+            action.half_size_offset = true;
+	    	action.name = string.format("Bloodedge %.2f", z_diff);
+            action:push();
+            return action	    
+else
+            action.when = 0.3;
+            action.hitbox = Vector3.new(weapon.length * 2.5, weapon.length * 2, weapon.length * 2.4);
+            action.offset = CFrame.new(0,0,-5)
+            action.name = "Scythe";
+            action:push();
+	    end
+
+        return action    
+end    
+} 
+end)();
+tbl['BoneSpear'] = (function() 
+return {
+    ids = {
+        "9681908909" 
+    },
+    action_type = "Parry",
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local bk
+        for _, child in workspace.Live:GetChildren() do
+            if child.Name:match("boneboy") then
+                bk = child
+                break
+            end
+        end
+
+        if not bk then return action end
+
+        task.wait(2.0) 
+        local start = tick()
+        local maxWaitTime = 3
+
+        while tick() - start < maxWaitTime do
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name == "BoneSpear" then
+                    local distanceThreshold = workspace:FindFirstChild("Layer2Floor1") and 30 or 75
+                    
+                    if (object.Position - local_player.root_part.Position).Magnitude < distanceThreshold then
+                        if not workspace:FindFirstChild("Layer2Floor1") then
+                            task.wait(0.2 - Latency:get_ping())
+                        end
+                        
+                        action.name = "BoneSpear Parry"
+                        action.when = 0
+                        action.type = "Parry"
+                        action.offset = CFrame.new(0, 0, 0)
+                        action.hitbox = Vector3.new(30, 30, 30)
+                        action.ignore_hitbox = true
+                        action.ignore_early_end = true
+                        
+                        action:push()
+                        return action
+                    end
+                end
+            end
+            task.wait()
+        end
+
+        return action
+    end    
+}
+ end)();
+tbl['BonekeeperCharge'] = (function() 
+return {
+    ids = {
+        "9681905891"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true, 
+
+    run = function(action) 
+        task.wait(0.8 - Latency:get_ping())
+        local when = tick();
+        repeat task.wait() until tick() - when > 2 or (local_player.root_part.Position - defender.entity.HumanoidRootPart.Position).Magnitude < 30
+        if tick() - when > 2 then
+            return action        
+end
+
+        action.when = 0;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(100, 30, 100);
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BonekeeperFloor'] = (function() 
+return {
+    ids = {
+        "9681916972"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        for i = 0, 10 do
+            action.when = 0.4;
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(80, 250, 80);
+            action.type = "Jump"
+    
+            action:push();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['BonekeeperLeap'] = (function() 
+return {
+    ids = {
+        "9681472252"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0;
+        action.type = "Jump";
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(200, 200, 200);
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BonekeeperSweep'] = (function() 
+return {
+    ids = {
+        "9681421310"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.6;
+        action.offset = CFrame.new(0, 0, -10)
+        action.hitbox = Vector3.new(20, 30, 40);
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['BurningServants'] = (function() 
+return {
+    ids = {
+        "5769343416"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        local hrp = defender.entity:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            return
+        end
+    
+        local player = game:GetService("Players"):GetPlayerFromCharacter(defender.entity)
+        local backpack = player and player:FindFirstChild("Backpack")
+    
+        if backpack and backpack:FindFirstChild("Mantra:SquadFire{{Burning Servants}}") then
+            local data = mantra.data(defender.entity, "Mantra:SquadFire{{Burning Servants}}")
+            local range = data.stratus * 2 + data.cloud * 1
+    
+            action.when = 0.32
+            action.type = "Parry"
+            action.hitbox = Vector3.new(30 + range, 25, 30 + range)
+            action.name = "Burning Servants Timing"
+            action:push();
+    
+            action.when = 2.3
+            action.type = "Parry"
+            action.hitbox = Vector3.new(30 + range, 25, 30 + range)
+            action.name = "Burning Servants Timing";
+            action.ignore_early_end = true;
+
+            return action:push()        
+else
+            local data = mantra.data(defender.entity, "Mantra:SquadIce{{Frozen Servants}}")
+            local range = data.stratus * 2 + data.cloud * 1
+    
+            action.when = 0.750
+            action.type = "Parry"
+            action.hitbox = Vector3.new(20 + range, 25, 20 + range)
+            action.name = "(1) Frozen Servants Timing"
+            action:push();
+    
+            action.when = 1.05;
+            action.type = "Parry"
+            action.hitbox = Vector3.new(20 + range, 25, 20 + range)
+            action.name = "(2) Frozen Servants Timing 2"
+            action.ignore_early_end = true;
+            return action:push()        
+end
+    end    
+} 
+end)();
+tbl['Caltrops'] = (function() 
+return {
+    ids = {
+        "14954130177"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true, 
+    action_type = "Spell", 
+
+    run = function(action) 
+        action.when = math.min(100 + (self:distance() * 8)) / 1000;
+        action.offset = CFrame.new(0, 0, -25)
+        action.hitbox = Vector3.new(20, 30, 50);
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ChaserSlam'] = (function() 
+return {
+    ids = {
+        "14531935090"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        repeat
+            task.wait()
+        until track.TimePosition >= 0.92
+    
+        action.when = 0
+        action.type = "Parry"
+        action.hitbox = Vector3.new(145, 65, 145)
+        action.name = string.format("(%.2f) Chaser Slam", track.Speed)
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ChimecallerCrit'] = (function() 
+return {
+    ids = {
+        "75972447119162"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Critical", 
+
+    run = function(action)
+        action.when = math.min(1350 + self:distance() * 2) / 1000;
+        action.type = "Dodge";
+        action.ignore_early_end = true;
+        action.hitbox = Vector3.new(100, 50, 100)
+        action.offset = CFrame.new();
+        action.name = string.format("(%.2f) Chimecaller Crit", self:distance())
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ClutchingShadow'] = (function() 
+return {
+    ids = {
+        "6385078248"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        task.wait(0.2 - Latency:get_ping());
+        if not local_player.character:FindFirstChild("NewShadow", true) then return end
+        action.when = 0;
+        action.offset = CFrame.new();
+        action.hitbox = Vector3.new(100, 100, 100);
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ColdpointCrit'] = (function() 
+return {
+    ids = {
+        "100635703599003"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Critical", 
+
+    run = function(action)
+        action.when = 0.5
+        action.type = "Parry";
+        action.ignore_early_end = true;
+        action.hitbox = Vector3.new(15, 15, 40)
+        action.offset = CFrame.new(0, 0, -20);
+        action.name = "Coldpoint Crit"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['CrimsonRain'] = (function() 
+return {
+    ids = {
+        "83367609184503"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        
+        
+        
+        
+        
+        
+        
+        
+
+        return action    
+end    
+} 
+end)();
+tbl['CrystalImpaleWindup'] = (function() 
+return {
+    ids = { "6054920207" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    ignore_animation_early_end = true,
+    action_type = "Undefined",
+
+    run = function(action)
+        action.when = 0.37
+        action.type = "Parry"
+        action.hitbox = Vector3.new(25, 30, 30)
+        action.name = "Crystal Impale Windup"
+        action:push()
+        return action
+    end,
+} 
+end)();
+tbl['CurvedCrit'] = (function() 
+return {
+    ids = {
+        "13290263661"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local distance = self:distance()
+
+        local d = distance;
+
+        local t = d / 20
+        local w = d <= 12 and 0.45 or 0.3 + 0.45 * t;
+        action.when = w;
+
+		action.type = "Parry" 
+        action.offset = CFrame.new(0,0,-(60 / 2))
+		action.hitbox = Vector3.new(25, 25, 70)
+        action.ignore_early_end = true;
+		action.name = string.format("Curved (%.2f, %.2f)", distance, w);
+        action:push();
+
+        action.when = w + 0.3;
+
+		action.type = "Parry" 
+        action.ignore_early_end = true;
+        action.offset = CFrame.new(0,0,-(60 / 2))
+		action.hitbox = Vector3.new(25, 25, 70)
+		action.name = string.format("Curved (%.2f)", distance)
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['CurvedCritDual'] = (function() 
+return {
+    ids = {
+        "13277887570"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local distance = self:distance()
+
+        local d = math.clamp(distance, 0, 30)
+
+        local t = d / 30
+        action.when = 0.20 + 0.45 * t
+
+		action.type = "Parry" 
+        action.offset = CFrame.new(0,0,-(70 / 2))
+		action.hitbox = Vector3.new(25, 25, 70)
+		action.name = string.format("Curved Dual (%.2f)", distance)
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DaggerCritical'] = (function() 
+return {
+    ids = {
+        "7350770431"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        local distance = self:distance()
+
+        action.when = 0.4
+        if distance >= 11 then
+            action.when = 0.65
+        end
+        if distance >= 13 then
+            action.when = 0.8
+        end
+        action.type = "Parry"
+        action.offset = CFrame.new(0,0,-5)
+        action.hitbox = Vector3.new(14, 15, 15)
+        action:push()
+        return action    
+end    
+} 
+end)();
+tbl['DarkBlade'] = (function() 
+return {
+    ids = {
+        "6038858570"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local num = 1;
+        action.when = 0.15
+
+		action.type = "Parry" 
+        action.offset = CFrame.new(0,0,-7.5)
+		action.hitbox = Vector3.new(16, 23, 22)
+		action.name = string.format("Dark Blade %i", 1)
+        action:push();
+
+        task.delay(0.2 - Latency:get_ping(), function()
+            local conn = thrown.ChildAdded:Connect(function(part)
+                if EffectReplicator:FindEffect("ParryCool") or not local_player.tracker:can_parry() then return end
+                if part.Name == "ShadowSlash" then
+                    num += 1;
+                    if num == 2 then return end
+
+                    action.when = 0
+
+                    action.type = "Parry" 
+                    action.offset = CFrame.new(0,0,-7.5)
+                    action.hitbox = Vector3.new(16, 23, 22)
+                    action.name = string.format("Dark Blade %i", num)
+                    action:play();
+                end;
+            end);
+
+            task.delay(5, function()
+                conn:Disconnect();
+            end);
+        end);
+
+        return action    
+end    
+} 
+end)();
+tbl['DeepWidowSwing'] = (function() 
+return {
+    ids = {
+        "6428514850",
+        "6428519131"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+	    local speed = track.Speed
+        local when = 0.3;
+
+	    if speed >= 0.45 and speed <= 0.55 then
+	    	when = 1.050
+	    end
+
+	    if speed >= 0.75 and speed <= 0.85 then
+	    	when = 0.750
+	    end
+
+	    if speed >= 0.9 and speed <= 1.0 then
+	    	when = 0.540
+	    end
+
+	    if defender.entity.Name:match(".miniwidow") then
+		    action.hitbox = Vector3.new(25, 25, 25)
+            when /= 1.1
+        else
+		    action.hitbox = Vector3.new(40, 40, 40)
+        end;
+		action.type = "Parry" 
+        action.when = when;
+        action.offset = CFrame.new(0,0,0)
+		action.name = string.format("Deep Widow Swing %.2f %.2f", speed, when)
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeCrouchSlash'] = (function() 
+return {
+    ids = {
+        "75177662439153"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+		action.when = 0.8
+		action.type = "Crouch"
+		action.hitbox = Vector3.new(50, 25, 50)
+        action.offset = CFrame.new(0,0,-25);
+		action.name = "Duke Wind Slash"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeGolemPunch'] = (function() 
+return {
+    ids = {
+        "75216423575082"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+		action.when = 0.9
+		action.type = "Dodge"
+		action.hitbox = Vector3.new(50, 50, 50)
+        action.offset = CFrame.new(0,0,-25);
+		action.name = "Golem Punch"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeGolemSlam'] = (function() 
+return {
+    ids = {
+        "112517047632505"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+		action.when = 0.5
+		action.type = "Crouch"
+		action.hitbox = Vector3.new(50, 50, 50)
+		action.name = "Golem Slam"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeGolemSlam2'] = (function() 
+return {
+    ids = {
+        "82450781977821"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+		action.when = 0.65
+		action.type = "Jump"
+		action.hitbox = Vector3.new(50, 50, 50)
+		action.name = "Golem Slam"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeGrasp'] = (function() 
+return {
+    ids = {
+        "8285321158"
+    },
+    action_type = "Spell",
+    default_chance = 100,
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.2 - Latency:get_ping());
+
+        action.name = "Duke Bomb Grab Short";
+        action.when = 0;
+        action.hitbox = Vector3.new(2000, 2000, 2000);
+        action.half_size_offset = true;
+        action.type = "Dodge";
+                
+        action:push();
+
+        local has_grab = false;
+        local start = tick();
+
+        while tick() - start < 1 or has_grab do
+            has_grab = false;
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name ~= "GrabPart" then continue end
+
+                has_grab = true;
+                
+                action.name = "Duke Bomb Grab";
+                action.when = 0;
+                action.ignore_hitbox = true;
+                action.ignore_early_end = true;
+                action.half_size_offset = true;
+                action.type = "Dodge";
+
+                action:push();
+            
+                return action            
+end;
+            task.wait();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeNewStomp'] = (function() 
+return {
+  ids = {
+      "105478410111896"
+  },
+  default_chance = 100,
+  allow_block_input = false,
+  allow_parry_to_roll = true,
+  allow_roll_to_parry = true,
+  allow_parry_to_block = true,
+
+  run = function(action)
+        local distance = self:distance();
+      
+        if defender.entity.Name:match(".theduke") then
+            if distance > 10 then
+                action.when = 1.0 
+            else
+                action.when = 0.8
+            end
+            action.name = string.format("Duke Stomp %.2f", distance);
+        else
+            if distance > 25 then
+                action.when = math.min(325 + distance * 13, 3000) / 1000
+            else
+                action.when = 0.65
+            end
+            action.name = string.format("Pillars of Erisia %.2f", distance);
+        end;
+      
+        action.hitbox = Vector3.new(40, 20, 60)
+        action.half_size_offset = true;
+        action.type = "Dodge";
+        action:push();
+
+        return action  
+end    
+} 
+end)();
+tbl['DukeStomp'] = (function() 
+return {
+  ids = {
+      "8290626574"
+  },
+  default_chance = 100,
+  allow_block_input = false,
+  allow_parry_to_roll = true,
+  allow_roll_to_parry = true,
+  allow_parry_to_block = true,
+
+  run = function(action)
+        local distance = self:distance();
+      
+        if defender.entity.Name:match(".theduke") then
+            if distance > 10 then
+                action.when = 1.0 
+            else
+                action.when = 0.8
+            end
+            action.name = string.format("Duke Stomp %.2f", distance);
+        else
+            action.when = 0.4
+            action.name = string.format("Pillars of Erisia %.2f", distance);
+        end;
+      
+        action.hitbox = Vector3.new(40, 20, 60)
+        action.half_size_offset = true;
+        action.type = "Dodge";
+        action:push();
+
+        return action  
+end    
+} 
+end)();
+tbl['DukeTripleKick'] = (function() 
+return {
+    ids = {
+        "10358800338"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+		action.when = 0.7
+		action.type = "Jump"
+		action.hitbox = Vector3.new(50, 50, 50)
+        action.offset = CFrame.new(0,0,-25);
+		action.name = "Kick 1"
+        action:push();
+
+		action.when = 1.65
+		action.type = "Jump"
+		action.hitbox = Vector3.new(50, 50, 50)
+        action.offset = CFrame.new(0,0,-25);
+		action.name = "Kick 2"
+        action:push();
+
+        action.when = 2.500
+		action.type = "Jump"
+		action.hitbox = Vector3.new(50, 50, 50)
+        action.offset = CFrame.new(0,0,-25);
+		action.name = "Kick 3"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['DukeWindBlast'] = (function() 
+return {
+    ids = {
+        "8286153000"
+    },
+    action_type = "Spell",
+    default_chance = 100,
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.1 - Latency:get_ping());
+
+        action.name = "Duke Arrow Short";
+        action.when = 0;
+        action.hitbox = Vector3.new(100, 100, 100);
+        action.half_size_offset = true;
+        action.type = "Parry";
+                
+        action:push();
+
+        local has_blast = false;
+        local start = tick();
+
+        while tick() - start < 1 or has_blast do
+            has_blast = false;
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name ~= "DukeBlast" then continue end
+
+                has_blast = true;
+                
+                action.name = "Duke Arrow";
+                action.when = 0;
+                action.ignore_hitbox = true;
+                action.ignore_early_end = true;
+                action.half_size_offset = true;
+                action.type = "Parry";
+
+                action:push();
+            
+                return action            
+end;
+            task.wait();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['ElderPrimaSixStomp'] = (function() 
+return {
+	ids = { "82589408775991" },
+	default_chance = 100,
+	allow_block_input = true,
+	allow_parry_to_roll = true,
+	action_type = "Undefined",
+
+	run = function(action)
+		local timings = { 0.550, 1.000, 1.450, 1.800, 2.150, 2.550 } 
+
+		local humanoid = defender.entity:FindFirstChildOfClass("Humanoid")
+		if not humanoid then
+			return
+		end
+
+		local halfhp = humanoid.Health <= (humanoid.MaxHealth / 2)
+
+		for idx = 1, 6 do
+			local when = timings[idx]
+
+			if halfhp then
+				when = when / 1.25
+			end
+
+			action.when = when
+			action.type = "Parry"
+			action.hitbox = Vector3.new(100, 250, 100)
+			action.name = string.format("(%.2f) Primadon SixStomp %i", track.Speed, idx)
+			action:push()
+		end
+
+		return action
+	end,
+}
+
+ end)();
+tbl['ElderPrimadonHandSlam'] = (function() 
+return {
+	ids = { "139012331361882" },
+	default_chance = 100,
+	allow_block_input = true,
+	allow_parry_to_roll = true,
+	action_type = "Undefined",
+
+	run = function(action)
+		local when = ((1200 * 1.21) / track.Speed) / 1000
+		action.when = when
+		action.type = "Dodge"
+		action.hitbox = Vector3.new(80, 250, 140)
+		action.name = string.format("(%.2f) Dynamic Primadon Timing", track.Speed)
+		action:push()
+
+		return action
+	end,
+}
+
+ end)();
+tbl['ElderPrimadonStomp'] = (function() 
+return {
+    ids = { "122173613929787" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    action_type = "Undefined",
+
+    run = function(action)
+        action.when = ((750 * 1.21) / track.Speed) / 1000
+        action.type = "Parry"
+        action.hitbox = Vector3.new(80, 250, 140)
+        action.name = string.format("(%.2f) Dynamic Primadon Timing", track.Speed)
+        action:push()
+        return action
+    end,
+}
+ end)();
+tbl['ElderPrimadonUltimateStomp'] = (function() 
+return {
+    ids = { "82315723491864" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    action_type = "Undefined",
+
+    run = function(action)
+        action.when = ((2130 * 1.21) / track.Speed) / 1000
+        action.type = "Parry"
+        action.hitbox = Vector3.new(100, 250, 100)
+        action.name = string.format("(%.2f) Dynamic Primadon Timing", track.Speed)
+        action:push()
+        return action
+    end,
+}
+ end)();
+tbl['ElectroCarveMagnet'] = (function() 
+return {
+    ids = { "15433825224" },
+    action_type = "Spell",
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.45 - Latency:get_ping())
+
+        action.name = "Electro Carve Magnet"
+        action.when = 0
+        action.offset = CFrame.new(0, 0, -15)
+        action.hitbox = Vector3.new(15, 20, 30)
+        action:push()
+
+        if general:in_hitbox(local_player.root_part.CFrame, defender.entity.HumanoidRootPart.CFrame, Vector3.new(15, 20, 35), CFrame.new(0, 0, -10), false) then return action end
+
+        local has_semtex = false
+        local start = tick()
+
+        while tick() - start < 1 or has_semtex do
+            has_semtex = false
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name ~= "Semtex" then continue end
+
+                has_semtex = true
+                if general:in_hitbox(local_player.root_part.CFrame, object.CFrame, Vector3.new(10, 10, 80), CFrame.new(0, 0, -40), false) then
+                    action.name = "Electro Carve Magnet"
+                    action.when = 0
+                    action.offset = CFrame.new(0, 0, -15)
+                    action.ignore_hitbox = true
+                    action.ignore_early_end = true
+                    action:push()
+                    return action
+                end
+            end
+            task.wait()
+        end
+
+        return action
+    end
+}
+ end)();
+tbl['EnforcerPullStart'] = (function() 
+return {
+    ids = {
+        "7271659917"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        if not (aztup and aztup.flags and aztup.flags.no_enforcer_pull) then
+            action.when = 0.4;
+            action.type = "Dodge";
+            action.offset = CFrame.new();
+            action.hitbox = Vector3.new(100, 100, 100);
+    
+            action:push();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['EnforcerSpin'] = (function() 
+return {
+    ids = {
+        "7019018522"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.3;
+        action.offset = CFrame.new();
+        action.hitbox = Vector3.new(16,20,16);
+
+        action:push();
+
+        action.when = 0.3;
+        action.offset = CFrame.new();
+        action.hitbox = Vector3.new(16,20,16);
+        action.type = "RPUE Parry";
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent        
+end;
+
+        action.wait = function()
+            task.wait(Latency:get_ping());
+        end
+
+        action.should = function()
+            return defender:in_hitbox(Vector3.new(16,20,16), CFrame.new(), true)        
+end;
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['EtherBarrage'] = (function() 
+return {
+    ids = {
+        "18637932235"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    ignore_animation_early_end = true,
+    
+    action_type = "Spell", 
+
+    run = function(action)
+        action.when = 0.5;
+        action.offset = CFrame.new(0,0,-20);
+        action.hitbox = Vector3.new(50, 30, 40);
+        action.type = "Start Block";
+        action:push();
+
+        action.when = 1.3;
+        action.offset = CFrame.new(0,0,-20);
+        action.hitbox = Vector3.new(50, 30, 40);
+        action.type = "End Block";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['FerrymanAssault'] = (function() 
+local teleportedAt = tick();
+local firstAnim = tick();
+
+return {
+    ids = {
+        "5968288116"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = false,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local target = defender.entity:FindFirstChild('Target');
+        if not target then
+	        local player = game:GetService("Players"):GetPlayerFromCharacter(defender.entity)
+	        local backpack = player and player:FindFirstChild("Backpack")
+
+	        local mantra = backpack and backpack:FindFirstChild("Mantra:StrikeWind{{Wind Passage}}")
+            if not mantra then 
+                return action            
+end;
+            action.name = "Wind Passage";
+            action.hitbox = Vector3.new(30, 30, 100);
+            action.offset = CFrame.new(0,0,0);
+            action.when = 0.41;
+            action:push();
+            return action        
+elseif target.Value ~= local_player.character then return action end;
+
+        local hum = defender.entity:FindFirstChild("Humanoid");
+        if not hum or hum.Health <= 0 then return action end;
+
+		if (hum.Health / hum.MaxHealth) * 100 >= 50 then
+			if tick()-teleportedAt > 2 then
+				if tick() - firstAnim > 3 then
+					firstAnim = tick();
+					return action				
+end
+				teleportedAt = tick();
+                action.when = 0.8;
+                action.ignore_hitbox = true;
+                action.name = string.format("Ferryman Teleport [1, %i]", math.round((hum.Health / hum.MaxHealth) * 100));
+        
+                return action:push()			
+else
+				teleportedAt = tick();
+                action.when = 0.2;
+                action.ignore_hitbox = true;
+                action.name = string.format("Ferryman Teleport [2, %i]", math.round((hum.Health / hum.MaxHealth) * 100));
+        
+                return action:push()			
+end
+		else
+			if tick()-teleportedAt > 2 then
+				if tick() - firstAnim > 3 then
+					firstAnim = tick();
+					return action				
+end
+				teleportedAt = tick();
+
+                action.when = 0.8;
+                action.ignore_hitbox = true;
+                action.name = string.format("Ferryman Teleport [3, %i]", math.round((hum.Health / hum.MaxHealth) * 100));
+        
+                return action:push()			
+else
+				teleportedAt = tick();
+				
+                action.when = 0.1;
+                action.ignore_hitbox = true;
+                action.name = string.format("Ferryman Teleport [4, %i]", math.round((hum.Health / hum.MaxHealth) * 100));
+        
+                return action:push()			
+end
+		end
+
+        return action    
+end    
+} 
+end)();
+tbl['FireEruption'] = (function() 
+return {
+    ids = {
+        "8378263543"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        if defender.entity:FindFirstChild("HumanoidRootPart") and defender.entity:FindFirstChild("HumanoidRootPart"):WaitForChild("REP_SOUND_3755636152", 0.1) then
+            action.when = 0.45;
+            action.name = "Ignition Deepcrusher Critical"
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(25, 25, 25);
+            action.ignore_early_end = true;
+            action.type = "Parry";
+            action:push();
+
+            action.when = 0.9;
+            action.name = "Ignition Deepcrusher Critical"
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(40, 25, 40);
+            action.ignore_early_end = true;
+            action.type = "Parry";
+            action:push();
+            return action        
+end;
+
+		action.when = 0.350
+		action.type = "Parry"
+		action.hitbox = Vector3.new(30, 25, 35)
+		action.name = "Fire Eruption 1st"
+        action:push();
+
+		action.when = 1.100
+		action.type = "Parry"
+		action.hitbox = Vector3.new(30, 25, 30)
+		action.name = "Fire Eruption 2nd"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['FirePalm'] = (function() 
+return {
+    ids = {
+        "7618754583"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local data = mantra.data(defender.entity, "Mantra:PalmFire{{Fire Palm}}")
+        local range = data.stratus * 3 + data.cloud * 2
+    
+        local hrp = defender.entity:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            return
+        end
+
+        action.when = 0.35
+        if hrp:WaitForChild("REP_SOUND_4377231054", 0.1) then
+            action.type = "Parry"
+            action.offset = CFrame.new(0,0,-15);
+            action.hitbox = Vector3.new(30, 20, 30)
+            action.name = "Gale Punch"
+            action.detect_gale_feint = true;
+            action:push();
+        else
+            action.type = "Parry"
+            action.offset = CFrame.new(0,0,-26.5);
+            action.hitbox = Vector3.new(25, 25, 70 + range)
+            action.name = "Fire Palm 0.7"
+            action:push();
+        end
+
+        return action    
+end    
+} 
+end)();
+tbl['FiringLine'] = (function() 
+return {
+    ids = {
+        "7543558046",
+        "13282373122"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        local mantra = mantra.data(defender.entity, "Mantra:GunMetal{{Firing Line}}")
+
+        
+        
+        if mantra.blast then
+            action.when = 0.3;
+            action.ignore_early_end = true;
+            action.hitbox = Vector3.new(40, 40, 60)
+            action.offset = CFrame.new(0,0,0);
+            action.name = string.format("Blast Spark Firing Line %i", self:distance());
+            action:push();
+
+            action.when = 0.5;
+            action.ignore_auto_parry_frames = true;
+            action.ignore_early_end = true;
+            action.hitbox = Vector3.new(40, 40, 60)
+            action.offset = CFrame.new(0,0,0);
+            action.name = string.format("Blast Spark Firing Line %i", self:distance());
+            action:push();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['FlameAssault'] = (function() 
+return {
+    ids = {
+        "7543558046"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+
+        
+        
+    
+        action.when = self:distance() <= 18 and 0.45 or math.min(350 + self:distance() * 5) / 1000;
+        action.hitbox = Vector3.new(40, 40, 60)
+        action.offset = CFrame.new(0,0,-30);
+        action.name = string.format("(%.2f) Flame Assault", self:distance());
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['FlameBlind'] = (function() 
+return {
+    ids = {
+        "7585268054"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        
+        action.ignore_early_end = true;
+        action.when = 0.6;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.one * 50;
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['FlameGrab'] = (function() 
+return {
+    ids = {
+        "5750353585"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+
+        
+        
+    
+        action.when = 0
+        action.hitbox = Vector3.new(20, 20, 25)
+        action:push();
+
+        action.when = 0;
+        action.offset = CFrame.new(0,0,-13.5);
+        action.hitbox = Vector3.new(25,40,25);
+        action.type = "RPUE Parry";
+        local shoulds = 0;
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent and shoulds <= 1        
+end;
+
+        action.wait = function()
+            task.wait(); 
+        end
+
+        action.should = function()
+            if defender:in_hitbox(Vector3.new(20,20,20), CFrame.new(0,0,-10), true) then
+                shoulds += 1;
+                return true            
+end
+            return false        
+end;
+
+        action:push();
+
+        
+        
+        
+    
+        
+        
+        
+    
+        
+        
+        
+    
+        
+        
+        
+        
+        
+
+        return action    
+end    
+} 
+end)();
+tbl['FlameRepulsion'] = (function() 
+return {
+    ids = {
+        "5774829118"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+	    local data = mantra.data(defender.entity, "Mantra:RepulsionFire{{Flame Repulsion}}")
+	    local range = data.stratus * 14 + data.cloud * 10
+
+	    action.when = 0.5;
+	    action.type = "Parry"
+	    action.hitbox = Vector3.new(32 + range, 32 + range, 32 + range)
+        action.shape = "ball";
+
+	    return action:push()    
+end    
+} 
+end)();
+tbl['FlareVolley'] = (function() 
+return {
+    ids = {
+        "17665718967"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.name = "Flare Volley";
+        action.when = math.min(300 + self:distance() * 8, 3000) / 1000;
+        action.ignore_early_end = true;
+        action.offset = CFrame.new(0, 0, -50)
+        action.hitbox = Vector3.new(30, 15, 100);
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['FleetingSparks'] = (function() 
+local function areOrbsStillAlive(orbs)
+	for _, orb in next, orbs do
+		if not orb.Parent then
+			continue
+		end
+
+		if not orb:FindFirstChild("PointLight") then
+			continue
+		end
+
+		return true
+	end
+
+	return false
+end
+
+return {
+	ids = {
+		"7599113567",
+	},
+	action_type = "Spell", 
+	default_chance = 100,
+	allow_block_input = false,
+	allow_parry_to_roll = true,
+	allow_roll_to_parry = true,
+	allow_parry_to_block = true,
+
+	run = function(action)
+		local thrown = workspace:FindFirstChild("Thrown")
+		if not thrown then
+			return action
+		end
+
+		task.spawn(function()
+			local listenerConn = local_player.character.DescendantAdded:Connect(function(child)
+				if child.Name ~= "Targeted" then
+					return
+				end
+				if not child.Parent or not child.Parent:IsA("Attachment") then
+					return
+				end
+
+           		action.ignore_early_end = true;
+           		action.name = "Ice Daggers Effect"
+           		action.when = 0.3;
+           		action.type = "Parry"
+           		action.ignore_hitbox = true;
+
+           		action:play();
+			end)
+
+			task.wait(1.2)
+
+			listenerConn:Disconnect()
+		end)
+
+		task.wait(0.7 - Latency:get_ping())
+
+		local orbs = {}
+
+		for _, part in pairs(thrown:GetChildren()) do
+			if not part:IsA("BasePart") then
+				continue
+			end
+
+			if not part.Name:match("LightningMote") then
+				continue
+			end
+
+			orbs[#orbs + 1] = part
+		end
+
+		local blockStarted = false
+
+		while task.wait() do
+			for _, orb in next, orbs do
+				if not areOrbsStillAlive(orbs) then
+					DefendActionManager:queue_unblock_task(defender.entity, 0)
+
+					return action
+				end
+
+				if not orb or not orb.Parent then
+					continue
+				end
+
+				if (orb.Position - local_player.root_part.Position).Magnitude >= 50 then
+					continue
+				end
+
+				if blockStarted then
+					continue
+				end
+
+				DefendActionManager:queue_block_task(defender.entity, 0)
+
+				blockStarted = true
+			end
+		end
+
+		return action
+	end,
+}
+
+ end)();
+tbl['GaleTrap'] = (function() 
+return {
+  ids = {
+      "7608490737"
+  },
+  action_type = "Spell", 
+  default_chance = 100, 
+
+  allow_block_input = true,
+  allow_parry_to_roll = true,
+  allow_roll_to_parry = true,
+  allow_parry_to_block = false,
+  ignore_animation_early_end = true,
+
+  run = function(action)
+      local player = game:GetService("Players"):GetPlayerFromCharacter(defender.entity)
+      local backpack = player and player:FindFirstChild("Backpack")
+
+    if backpack and backpack:FindFirstChild("Mantra:ForgeFire{{Fire Forge}}") then      
+          action.when = 0;
+          action.ignore_early_end = true;
+          action.name = "FireForgeClose"
+          action.type = "Parry"
+          action.hitbox = Vector3.new(15, 15, 20)
+          action.offset = CFrame.new(0, 0, 0);
+          action:push()
+          return action      
+end
+    
+      if backpack and backpack:FindFirstChild("Mantra:TrapWind{{Galetrap}}") then      
+          action.when = 0.27;
+          action.ignore_early_end = true;
+          action.name = "GaleTrap"
+          action.type = "Parry"
+          action.hitbox = Vector3.new(10, 25, 40)
+          action.offset = CFrame.new(0, 0, -20);
+          action:push()
+          return action      
+end
+      
+      return action  
+end    
+} 
+end)();
+tbl['GenericAerial'] = (function() 
+return {
+    ids = {
+        "7576748728",
+        "7576614609",
+        "11363599835",
+        "95071929775027",
+        "8194213529"
+    },
+    action_type = "M1", 
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        if not weapon.type or not weapon.length then return end
+        
+        task.wait(((0.163 / track.Speed) + 0.1) - Latency:get_ping());
+        while self:is_playing() and task.wait(0.035) do
+            if not defender or not defender.entity then continue end
+            if not defender:in_hitbox_with_pos(
+                local_player.root_part.CFrame, 
+                defender.entity.HumanoidRootPart.CFrame, 
+                Vector3.new(12, 20, ((weapon.length * 2.9) + (Latency:get_ping() * weapon.length))), 
+                CFrame.new(0,0,-5)
+            ) then continue end
+    
+            action.base_and_predict = true;
+            action.predict = true;
+            action.name = string.format("Aerial [%s, %s, %s]", weapon.length, weapon.type, track.Animation.AnimationId);
+            action.when = 0;
+    
+            action.offset = CFrame.new(0, 0, weapon.length * -0.8)
+            action.ignore_hitbox = true;
+            
+                    
+            action:push();
+            break        
+end;
+
+        return action    
+end    
+} 
+end)();
+tbl['GenericKick'] = (function() 
+return {
+    ids = {
+        "9484850093",
+        "106333512017575"
+    },
+    action_type = "M1", 
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        if not weapon.type or not weapon.length then return end
+
+        action.base_and_predict = true;
+        action.predict = true;
+    
+        action.name = string.format("Kick - %0.2f, %s", weapon.length, weapon.type);
+        local hitbox = Vector3.new(weapon.length * 2.25, weapon.length * 3, weapon.length * 2.25);
+        local windup = 0.35;
+
+        if weapon.type == "Rifle" then
+            windup =  (0.16 / track.Speed) + 0.150;
+            hitbox = Vector3.new(weapon.length * 2.3, weapon.length * 3, weapon.length * 2);
+
+        end
+
+        action.when = windup;
+        action.hitbox = hitbox;
+        action.name = string.format("%s Kick - %0.1f", weapon.type, weapon.length);
+        action.predict_rotation = true;
+        action.offset = CFrame.new(0, 0, -5)
+
+        if aztup_options.m1_timing_hitbox_type.Value == "Ball" then
+            action.shape = "ball";
+        end
+        
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['GenericM1'] = (function() 
+ function has_heavy_hands(mob)
+    for _,v in next, mob:GetChildren() do
+        if v.Name ~= 'Ring' or v:GetAttribute("EquipmentRef") ~= "Heavy Hands Ring" then continue end 
+
+        return true    
+end
+
+    return false
+end;
+ 
+local timing_ids = {
+    '93964938784148', 
+    '93964938784148', 
+    '86466909898596', 
+    '119153579346494',
+    '12106093579',           
+    '12106095892',           
+    '96251946143797',           
+    '107771611881875',           
+    '7600485223',           
+    '16654113357',           
+    '14435770311',           
+    
+    '11493920418',           
+    '88620745767944',           
+    '17666279427',           
+    '17666287806',           
+    '7600485223',           
+    '7627854272',           
+    '101975669191368',           
+    '9597280175',           
+    '5067105317',           
+    '16654113357',           
+    '115757796989607',           
+    
+    '16372422960',           
+    '106608030834708',           
+    '9928485641',           
+    
+    '16654105888',           
+    '90742361803263',           
+    '80513922848003',           
+    '114108670383026',           
+    '11186654931',           
+    '7600450739',           
+    '16372478422',           
+    '6607519294',           
+    '131576892263777',           
+    '6063195211',           
+    '9832727905',           
+    '7627049402',           
+    '9313226324',           
+    '13241958217',           
+    '11186656574',           
+    '7627049402',           
+    '7627854272',           
+    '103284896140202',           
+    '8161044711',           
+    '16372479940',           
+    '8249177669',           
+    '9930447958',           
+    '7627854272',           
+    '113419264758259',           
+    '16654099937',           
+    '8249175106',           
+    '9832727905',           
+    '6607519294',           
+    '14435773739',           
+    '7616407967',           
+    '11493920418',           
+    '17666284182',           
+    '9597272746',           
+    '12138861998',           
+    '8161043368',           
+    '14435763579',           
+    '74422917176963',           
+    '16654099937',           
+    '12106093579',           
+    '7627854272',           
+    '13241958217',           
+    '6063188218',           
+    '13242083070',           
+    '16654099937',           
+    '123115833203242',           
+    '5064195992',           
+    '16654105888',           
+    '81374297342678',           
+    '9928485641',           
+    '8161039359',           
+    '14435778571',           
+    '8161043368',           
+    '9832721746',           
+    
+    '99450771029342',           
+    '7600450739',           
+    '7627889074',           
+    '9832721746',           
+    '98624535650879',           
+    '12138857946',           
+    '81374297342678',           
+    
+    '9832724876',           
+    '16372478422',           
+    '88620745767944',           
+    '7627854272',           
+    '12138860062',           
+    '9928429385',           
+    '17197732174',           
+    '139109176874463',           
+    '8161039359',           
+    '16372412925',           
+    '8161043368',           
+    '100190998225588',           
+    '106858298622632',           
+    '106858298622632',           
+    '16654105888',           
+    '101975669191368',           
+    '77160956516659',           
+    '102858834757078',           
+    '17197704130',           
+    '111781160894259',           
+    '101975669191368',           
+    '111781160894259',           
+    '106608030834708',           
+    '16654113357',           
+    '97447284729710',           
+    '94626092299428',           
+    '7627889074',           
+    '7600450739',           
+    '5067105317',           
+    '11493920418',           
+    '119672037814127',           
+    '13242083070',           
+    '7627889074',           
+    '122256431354649',           
+    '135226142279222',           
+    '13241958217',           
+    '94626092299428',           
+    '7600450739',           
+    '14435766591',           
+    '90742361803263',           
+    '131576892263777',           
+    '13241958217',           
+    '7627854272',           
+    '7600450739',           
+    '16372427756',           
+    '7600485223',           
+    '9597272746',           
+    '94626092299428',           
+    '121003629056681',           
+    '89177958009696',           
+    '7626771915',           
+    '87039001813522',           
+    '12106091136',           
+    '138417702895229',           
+    '94626092299428',           
+    '11186652658',           
+    '8161044711',           
+    '8249175106',           
+    '7626771915',           
+    '5064195992',           
+    '110004733402661',           
+    '5064195992',           
+    '102858834757078',           
+ 
+    '12106091136',           
+    '12106095892',           
+    '9832724876',           
+    '123115833203242',           
+    '5067105317',           
+    '17197593993',           
+    '7626771915',           
+    '9930618934',           
+    '6607538047',           
+    '7626771915',           
+    '125647240494772',           
+    '16372476897',           
+    '8161039359',           
+    "7600450739", 
+    "7600485223", 
+    "7600224169", 
+    "7600160919",
+    "5064195992", 
+    "5067105317", 
+    
+    "6675698010", 
+    "6675703249", 
+    "107653610777693",
+
+    "7627372304",
+    "7627558238",
+    "5950080662",
+
+    
+    "123456225328134",
+    
+    "6437665734",
+    "6432920452",
+
+    
+    "9597289518",
+    "96170267983421", 
+    "17666287806", 
+    "17636520960", 
+    "92625055798566", 
+    "83142103198119" 
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+return {
+    ids = timing_ids,
+    action_type = "M1", 
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        if not weapon.type or not weapon.length then return end
+
+        action.base_and_predict = true;
+        action.predict = true;
+        action.predict_rotation = true;
+        
+
+        
+        
+        local debug_extras = "";
+        local ignore_ball = false;
+        local hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 2.8); 
+        local windup = 0;
+        local offset = CFrame.new(0, 0, -5);
+        if weapon.type == "Greataxe" and track.Speed ~= 1.0 then
+            windup = (0.171 / track.Speed) + 0.120
+        elseif weapon.type == "Greataxe" and track.Speed == 1.0 then
+            windup = (0.171 / track.Speed)
+            windup += 0.250 / (weapon.ss * (has_heavy_hands(defender.entity) and 0.9 or 1))
+        elseif weapon.type == "Greathammer" and track.Speed ~= 1.0 then
+            windup = (0.150 / track.Speed) + 0.150
+        elseif weapon.type == "Greathammer" and track.Speed == 1.0 then
+            windup = (0.150 / track.Speed)
+            windup += 0.250 / weapon.ss
+        elseif weapon.type == "Greatcannon" and track.Speed ~= 1.0 then
+            windup = (0.155 / track.Speed) + 0.160
+        elseif weapon.type == "Greatcannon" and track.Speed == 1.0 then
+            windup = (0.155 / track.Speed) + 0.300
+        elseif weapon.type == "Rapier" then
+            windup = (0.155 / track.Speed) + 0.120
+        elseif weapon.type == "Bow" then
+            local thrown_object = workspace.Thrown:FindFirstChild("Attach_" .. defender.entity.Name)
+            local tip_attachment: Attachment? = thrown_object and thrown_object:FindFirstChild("HandWeapon") and thrown_object:FindFirstChild("HandWeapon"):FindFirstChild("TipAttachment");
+            if tip_attachment then 
+                local ready = false;
+                while task.wait() and self:is_playing() do
+                    ready = tip_attachment:FindFirstChild("Spark");
+                    if ready then break end
+                end
+
+                if not ready then return end
+            end
+            windup = 0
+            hitbox = Vector3.new(weapon.length * 2, weapon.length * 2, weapon.length * 2); 
+            ignore_ball = true;
+        elseif weapon.type == "Pistol" and not (track.Animation.AnimationId:match("14435770311") or track.Animation.AnimationId:match("14435773739") or track.Animation.AnimationId:match("14435778571")) then
+            windup = 0.350 / weapon.ss
+        elseif weapon.type == "Pistol" and (track.Animation.AnimationId:match("14435770311") or track.Animation.AnimationId:match("14435773739") or track.Animation.AnimationId:match("14435778571")) then
+	        local ispeed = track.Speed
+            repeat
+                task.wait()
+            until track.Speed ~= ispeed
+    
+            windup = 0.075 / track.Speed
+    
+            if track.Speed == 0.0 then
+                windup = 0.100
+            end
+        elseif weapon.type == "Rifle" and track.Animation.AnimationId:match("9928485641") then    
+            windup = track.Speed * 0.55
+            
+    
+            if track.Speed == 0.0 then
+                windup = 0.100
+                debug_extras ..= " 0s"
+            end
+            debug_extras ..= " [odd anim]"
+        elseif weapon.type == "Rifle" then
+            windup = (0.2 / track.Speed)
+        elseif weapon.type == "Club" then
+            windup = (0.180 / track.Speed) + 0.100
+        elseif weapon.type == "Twinblade" then
+            windup = (0.150 / track.Speed) + 0.050
+            
+            if track.Animation.AnimationId:match("123456225328134") then
+                windup = 0.45;
+                debug_extras ..= "first"
+            end
+        elseif weapon.type == "Spear" then
+            windup = (0.150 / track.Speed) + 0.100
+            hitbox = Vector3.new(weapon.length * 2.5, weapon.length * 2, weapon.length * 2.4);
+            ignore_ball = true
+        elseif weapon.type == "Greatsword" then
+            hitbox = Vector3.one * (weapon.length * 2.5); 
+            windup = (0.158 / track.Speed) + 0.150
+        elseif weapon.type == "Fist" then 
+            windup = (0.140 / track.Speed) + 0.130
+            for _, anim in defender.entity.Humanoid:GetPlayingAnimationTracks() do
+                if anim.Animation.AnimationId == "rbxassetid://92562352733890" then
+                    windup = 0;
+                end
+            end
+        elseif weapon.type == "Dagger" then
+            windup = (0.150 / track.Speed) + 0.075
+            hitbox = Vector3.new(weapon.length * 3.8, weapon.length * 4, weapon.length * 4); 
+        elseif weapon.type == "Sword" then
+            windup = (0.150 / track.Speed) + 0.05
+            hitbox = Vector3.one * (weapon.length * 2.5); 
+            ignore_ball = true;
+        end
+        if weapon.type == "Staff" then
+            windup = (0.150 / track.Speed) + 0.08
+            hitbox = Vector3.new(weapon.length * 3.65, weapon.length * 2.7, weapon.length * 3.8); 
+        end
+
+        if weapon.type == "Rifle" then
+            hitbox = Vector3.new(weapon.length * 3.8, weapon.length * 4.5, weapon.length * 3);
+            if track.Animation.AnimationId:match("9928485641") then
+                hitbox = Vector3.new(weapon.length * 3, weapon.length * 4.5, weapon.length * 2.5);
+            end
+            
+            debug_extras ..= " [" .. track.Animation.AnimationId .. "]";
+        elseif weapon.type == "Twinblade" then
+            hitbox = Vector3.new(weapon.length * 3, weapon.length * 4.5, weapon.length * 3.15);
+        elseif weapon.type == "Fist" then
+            hitbox = Vector3.one * (weapon.length * 2.5); 
+        end
+
+        if weapon.type == "Rifle" then
+            hitbox = Vector3.new(weapon.length * 2.5, weapon.length * 2, weapon.length * 1.75);
+            ignore_ball = true;
+            action.predict_time = 0.1;
+            action.base_and_predict = true;
+        end;
+
+        local debug_name = string.format("%s M1 - %0.2f, %0.1f, %s", weapon.type, windup * 2.351, weapon.length, #debug_extras > 0 and debug_extras or "none");
+        action.name = debug_name;
+        action.when = windup;
+        action.predict_rotation = true;
+        action.offset = offset;
+
+        if aztup_options.m1_timing_hitbox_type.Value == "Ball" and not ignore_ball then
+            action.shape = "ball";
+        end
+
+        action.hitbox = hitbox;
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['GenericRunning'] = (function() 
+return {
+    ids = {
+            '6669352471',           
+            '112381112390648',           
+            '8367730650',           
+            '5063313656',           
+            '5827250000',           
+            '17108126093',           
+            
+            '5827250000',           
+            '6669352471',           
+            '6669352471',           
+            '6669352471',           
+            '5063313656',           
+            '8367730650',           
+            '11493924588',           
+            '4699358112',           
+            '11493924588',           
+            '5827250000',           
+            '8367730650',           
+            '5063313656',           
+            '5063313656',           
+            '5063313656',           
+            '5063313656',           
+            '135041461821238',           
+            '6669352471',           
+            '5827250000',           
+            '5063313656',           
+            '11493924588',           
+            '5063313656',           
+            '5063313656',           
+            '11493924588',           
+            '5063313656',           
+            '101584283427561',           
+            '6669352471',           
+            '4699358112',           
+            '133871771843754',           
+            '5063313656',           
+            '4699358112',           
+            '5063313656',           
+            '4699358112',           
+            '5827250000',           
+            '8367730650',           
+            '8367730650',           
+            
+            '11493924588',           
+            '5063313656',           
+            '17108040817',           
+            '82342705344145',           
+            '4699358112',           
+            '12496646061',           
+            '17108040817',           
+            '6669352471',           
+            '4699358112',           
+            '17108040817',           
+            '5063313656',           
+            '5827423063', 
+    },
+    action_type = "M1", 
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        if not weapon.type or not weapon.length then return end
+
+        action.base_and_predict = true;
+        action.predict = true;
+
+        
+
+        
+        
+        action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 3); 
+        action.offset = CFrame.new(0, 0, -5)
+
+        local windup = 0;
+        if weapon.type == "Dagger" then
+            windup = (0.147 / track.Speed) + 0.140
+        elseif weapon.type == "Greatsword" then
+            windup = (0.160 / track.Speed) + 0.160
+            windup += 0.1 / weapon.ss
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 4); 
+
+        elseif weapon.type == "Greataxe" then
+            windup = (0.150 / track.Speed) + 0.100
+            windup += 0.100 / weapon.ss
+        elseif weapon.type == "Greatcannon" then
+            windup = (0.160 / track.Speed) + 0.160
+            windup += 0.100 / weapon.ss
+        elseif weapon.type == "Greathammer" then
+            windup = (0.160 / track.Speed) + 0.160
+            windup += 0.100 / weapon.ss
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 4); 
+        elseif weapon.type == "Spear" then
+            windup = (0.150 / track.Speed) + 0.140
+            windup += 0.100 / weapon.ss
+        elseif weapon.type == "Pistol" then
+            repeat
+                task.wait()
+            until track.Speed >= 0.1
+    
+            windup = (0.300 / track.Speed)
+        elseif weapon.type == "Rifle" then
+            windup = (0.169 / track.Speed) + 0.180
+            windup += 0.100 / weapon.ss
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 2.825); 
+            action.offset = CFrame.new()
+            action.half_size_offset = true;
+        elseif weapon.type == "Sword" then
+            windup = (0.135 / track.Speed) + 0.100
+            windup += 0.1 / weapon.ss
+        elseif weapon.type == "Staff" then
+            windup = (0.135 / track.Speed) + 0.100
+            windup += 0.150 / weapon.ss
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 2.8); 
+            action.offset = CFrame.new()
+            action.half_size_offset = true;
+        elseif weapon.type == "Rapier" then
+            windup = (0.238 / track.Speed) + 0.060
+        elseif weapon.type == "Club" then
+            windup = (0.173 / track.Speed) + 0.100
+            windup += 0.150 / weapon.ss
+        elseif weapon.type == "Bow" then
+            windup = 0.2
+        elseif weapon.type == "Twinblade" then
+            windup = (0.164 / track.Speed) + 0.100
+            windup += 0.150 / weapon.ss
+        elseif weapon.type == "Fist" then
+            windup = (0.153 / track.Speed) + 0.120
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 3.3); 
+            action.offset = CFrame.new()
+            action.half_size_offset = true;
+        end
+    
+        action.name = string.format("Running Attack - %0.2f, %0.2f, %s", windup, weapon.length, weapon.type);
+        action.when = windup;
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['GolemSpin'] = (function() 
+return {
+    ids = {
+        "6501497627"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.8 + 2.7;
+        action.offset = CFrame.new(0,0,-13.5);
+        action.hitbox = Vector3.new(25,40,25);
+        task.delay(0.8 + 2.7, function() 
+            print(self:is_playing() and defender.entity.Parent)
+        end);
+
+        action:push();
+
+        action.when = 0.8 + 2.7;
+        action.offset = CFrame.new(0,0,-13.5);
+        action.hitbox = Vector3.new(25,40,25);
+        action.type = "RPUE Parry";
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent        
+end;
+
+        action.wait = function()
+            task.wait(.125 - Latency:half_ping());
+        end
+
+        action.should = function()
+            return general:in_hitbox(local_player.root_part.CFrame, defender.entity:GetPivot(), Vector3.new(25,40,35), CFrame.new(0,0,-13.5), false)        
+end;
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['GrandJavelin'] = (function() 
+return {
+    ids = {
+        "8183996606"
+    },
+    action_type = "Spell",
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.4 - Latency:get_ping())
+
+        action.name = "Grand Javelin"
+        action.when = 0
+        action.offset = CFrame.new(0, 0, -15)
+        action.hitbox = Vector3.new(15, 20, 30)
+        action:push()
+
+        if general:in_hitbox(local_player.root_part.CFrame, defender.entity.HumanoidRootPart.CFrame, Vector3.new(15, 20, 35), CFrame.new(0, 0, -10), false) then return action end
+
+        local has_javelin = false
+        local start = tick()
+
+        while tick() - start < 1 or has_javelin do
+            has_javelin = false
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name ~= "SpearPart" or object.Name:find("Splinter") then continue end
+
+                has_javelin = true
+                if general:in_hitbox(local_player.root_part.CFrame, object.CFrame, Vector3.new(10, 10, 80), CFrame.new(0, 0, -40), false) then
+                    action.name = "Grand Javelin"
+                    action.when = 0
+                    action.offset = CFrame.new(0, 0, -15)
+                    action.ignore_hitbox = true
+                    action.ignore_early_end = true
+                    action:push()
+                    return action
+                end
+            end
+            task.wait()
+        end
+
+        return action
+    end
+}
+ end)();
+tbl['IceCarve'] = (function() 
+return {
+    ids = {
+        "15714151635"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        local mantra = mantra.data(defender.entity, "Mantra:CarveIce{{Ice Carve}}")
+        if mantra and mantra.spring then
+            action.ignore_early_end = true;
+            action.name = "Ice Carve Spring Spark"
+            action.when = 0.2;
+            action.type = "Dodge"
+            action.offset = CFrame.new(0, 0, -10)
+            action.hitbox = Vector3.new(40, 32, 25);
+
+            action:push();
+
+            action.ignore_early_end = true;
+            action.name = "Ice Carve Spring Spark"
+            action.when = 0.3;
+            action.type = "Dodge"
+            action.offset = CFrame.new(0, 0, -25)
+            action.hitbox = Vector3.new(40, 32, 25);
+
+            action:push();
+
+            return action        
+end
+
+        action.name = "Ice Carve";
+        action.when = 0.2;
+        action.offset = CFrame.new(0, 0, -7.5)
+        action.hitbox = Vector3.new(15,20,15);
+                
+        action:push();
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+
+        return action    
+end    
+} 
+end)();
+tbl['IceFlock'] = (function() 
+return {
+    ids = {
+        "16079914008"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        local distance = self:distance()
+        action.when = 0.5
+
+        action.type = "Parry"
+        action.name = string.format("%.2f Ice Flock", distance)
+        action.hitbox = Vector3.new(30, 20, 30) 
+        action:push()
+        
+        action.when = 0.7
+
+        action.type = "Parry"
+        action.name = string.format("%.2f Ice Flock", distance)
+        action.hitbox = Vector3.new(30, 20, 30) 
+        action:push()
+        return action    
+end    
+} 
+end)();
+tbl['IceForge'] = (function() 
+return {
+    ids = {
+        "8467835626"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        local cube_conn do
+            local cube_count = 0;
+            local last_parry = 0;
+            cube_conn = workspace.Thrown.ChildAdded:Connect(function(a)
+                if a.Name == "Cube" then
+                    cube_count += 1;
+                    if cube_count >= 3 then
+                        cube_conn:Disconnect();
+                    end;
+                    repeat 
+                        task.wait()         
+                    until a.Velocity.Magnitude > 10 and (a.Position - local_player.root_part.Position).Magnitude < (a.Velocity.Magnitude / 1.85) or not a.Parent;
+                    if not a.Parent then return end
+                    if a.Velocity.Magnitude < 25 then
+                        task.wait(0.5 + (self:distance() / 30));
+                    end;
+                    if tick() - last_parry < 0.2 and (a.Position - local_player.root_part.Position).Magnitude > 20 then return end
+    
+                    if a.Velocity.Magnitude < 0.5 then
+                        return                    
+end
+                    DefendActionManager:queue_generic_parry_task(defender.entity, 0);
+                    last_parry = tick();
+                end
+            end);
+    
+            task.delay(15, function()
+                cube_conn:Disconnect();
+            end);
+        end;
+
+        task.wait(0.4 - Latency:get_ping());
+
+        local start = tick();
+        local has_ice_dagger = false;
+        while tick() - start < 2 or has_ice_dagger do
+            has_ice_dagger = false;
+            for _, child in workspace.Thrown:GetChildren() do
+                if child.Name ~= "IceShuriken" then continue end
+                if child.Velocity.Magnitude <= 0.2 then continue end
+
+
+                has_ice_dagger = true;
+                local mag = (child.Position - game:GetService("Players").LocalPlayer.Character.HumanoidRootPart.Position).Magnitude;
+                if mag > 30 then continue end
+
+                action.name = "Ice Forge";
+                action.when = 0;
+                action.ignore_early_end = true;
+                action.offset = CFrame.new(0, 0, 0)
+                action.hitbox = Vector3.new(2000, 2000, 2000);
+                action.ignore_hitbox = true;
+                        
+                action:push();
+                return action            
+end;
+            task.wait();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['IceSpike'] = (function() 
+return {
+    ids = {
+        "7543723607"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local start = tick(); 
+        repeat 
+            task.wait() 
+
+            for _, spike in pairs(workspace.Thrown:GetChildren()) do
+                if spike.Name == "IceCircle" and general:in_hitbox(local_player.root_part.CFrame, spike.CFrame, Vector3.new(15, 20, 15), CFrame.new(), true) then
+                    action.when = 0.2;
+                    action.offset = CFrame.new(0, 0, -10)
+                    action.hitbox = Vector3.new(20, 30, 40);
+                    action.ignore_hitbox = true;
+                    action:push();
+                    return action                
+end
+            end
+        until tick() - start > 1;
+
+        
+        
+        
+
+        
+
+        return action    
+end    
+} 
+end)();
+tbl['Iceberg'] = (function() 
+return {
+    ids = {
+        "9234812388"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.name = "Iceberg";
+        action.when = 1;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(40, 10, 40);
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ImperatorsEdgeCrit'] = (function() 
+return {
+    ids = {
+        "74712624949815"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local distance = self:distance()
+
+        local d = distance;
+
+        local t = d / 40
+        local w = d <= 12 and 0.45 or 0.3 + 0.45 * t;
+        action.when = w;
+
+		action.type = "Parry" 
+        action.offset = CFrame.new(0,0,-(80 / 2))
+		action.hitbox = Vector3.new(7.5, 25, 90)
+        action.ignore_early_end = true;
+		action.name = string.format("Imperators Edge Crit (%.2f, %.2f)", distance, w);
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['KaritaLeap'] = (function() 
+return {
+    ids = {
+        "73703637156475"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+
+        action.when = 0.5
+
+		action.type = "Parry" 
+        action.offset = CFrame.new(0, 0, -20)
+		action.hitbox = Vector3.new(15, 10, 45)
+		action.name = "Karita Leap"
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KickFollowupTitus'] = (function() 
+return {
+    ids = {
+        "80865399851806"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        if not defender.entity.Name:find(".titus") or defender.entity:FindFirstChild("Target") and defender.entity:FindFirstChild("Target").Value ~= local_player.character then return action end
+        action.when = 0.3;
+        action.type = "Dodge";
+        action.offset = CFrame.new(0, 0, 0)
+        action.ignore_hitbox = true;
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KingCrocSlam'] = (function() 
+return {
+    ids = {
+        "9921853885"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "M1", 
+
+    run = function(action)
+        action.when = 0.7;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(40, 40, 40);
+        action.type = "Jump"
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionFiveHitCombo'] = (function() 
+return {
+    ids = {
+        "132499670118034"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.64;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 5-Hit Combo 1";
+        action:push();
+
+        action.when = 1.15;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 5-Hit Combo 2";
+        action:push();
+
+        action.when = 2.15;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 5-Hit Combo 3";
+        action:push();
+
+        action.when = 2.70;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 5-Hit Combo 4";
+        action:push();
+
+        action.when = 3.80;
+        action.type = "Dodge";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 5-Hit Combo 5";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionFourHitCombo'] = (function() 
+return {
+    ids = {
+        "127741055541488"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.64;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 4-Hit Combo 1";
+        action:push();
+
+        action.when = 1.34;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 4-Hit Combo 2";
+        action:push();
+
+        action.when = 2.04;
+        action.type = "Legit Jump";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 4-Hit Combo 3";
+        action:push();
+
+        action.when = 3.10;
+        action.type = "Dodge";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 4-Hit Combo 4";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionSpikeCombo'] = (function() 
+return {
+    ids = {
+        "133763199472108"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.90;
+        action.type = "Dodge";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Spike Combo 1";
+        action:push();
+
+        action.when = 1.55;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Spike Combo 2";
+        action:push();
+
+        action.when = 2.10;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Spike Combo 3";
+        action:push();
+
+        action.when = 3.25;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Spike Combo 4";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionSweep'] = (function() 
+return {
+    ids = {
+        "80169226986818"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.57;
+        action.type = "Legit Jump";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Sweep 1";
+        action:push();
+
+        action.when = 0.75;
+        action.type = "Crouch";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Sweep 2";
+        action:push();
+
+
+        
+
+
+
+
+
+
+return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionThreeHitCombo'] = (function() 
+return {
+    ids = {
+        "100777123071173"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.51;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 3-Hit Combo 1";
+        action:push();
+
+        action.when = 1.12;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 3-Hit Combo 2";
+        action:push();
+
+        action.when = 1.26;
+        action.type = "Crouch";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion 3-Hit Combo 3";
+        action:push();
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+return action    
+end    
+} 
+end)();
+tbl['KyrsgardeChampionWindupSlash'] = (function() 
+return {
+    ids = {
+        "106268260112496"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.50;
+        action.type = "Start Block";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Windup Slash";
+        action:push();
+
+        action.when = 2.00;
+        action.type = "End Block";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Ice Champion Windup Slash 2";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['LightningStream'] = (function() 
+local function checkRangeFromPing(obj, rangeCheck, speed)
+    if (not local_player.root_part) then return false end;
+
+    local distance = (obj.Position - local_player.root_part.Position).Magnitude;
+
+    distance = (obj.Position - local_player.root_part.Position).Magnitude;
+    distance -= speed * (Latency:get_ping() / 1000);
+
+    return distance <= rangeCheck, distance, Latency:get_ping() / speed
+end;
+
+return {
+    ids = {
+        "7761251007"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+		local distance = self:distance();
+		if (distance > 200) then return end;
+		local ranAt = tick();
+        
+        
+		repeat
+			for _, v in next, workspace.Thrown:GetChildren() do
+				if (v.Name == 'STREAMPART' and v:IsA('BasePart')) then
+					local rocket: RocketPropulsion = v:FindFirstChild('RocketPropulsion');
+					local rocketTarget = rocket and rocket.Target;
+					if (rocketTarget ~= local_player.root_part) then continue end;
+					if(not checkRangeFromPing(v, 22.5 + math.min(rocket.MaxSpeed / 3, 10), rocket.MaxSpeed)) then continue end;
+					
+                    action.when = 0.2;
+                    action.offset = CFrame.new(0, 0, 0)
+                    action.hitbox = Vector3.new(2500, 2500, 2500);
+                    action.ignore_early_end = true;
+                    action.ignore_hitbox = true;
+                    action:push();
+                    
+					return action				
+end;
+			end;
+			task.wait();
+		until tick() - ranAt > 3.5;
+        
+        
+        
+        
+        
+        
+		
+
+        return action    
+end    
+} 
+end)();
+tbl['LightningStreamCast'] = (function() 
+return {
+    ids = {
+        "5968796999"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.5;
+        action.ignore_early_end = true;
+        action.offset = CFrame.new(0, 0, -7.5)
+        action.hitbox = Vector3.new(0,0,15);
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['LightningStreamPull'] = (function() 
+local function checkRangeFromPing(obj, rangeCheck, speed)
+    if (not local_player.root_part) then return false end;
+
+    local distance = (obj.Position - local_player.root_part.Position).Magnitude;
+
+    distance = (obj.Position - local_player.root_part.Position).Magnitude;
+    distance -= speed * (Latency:get_ping() / 1000);
+
+    return distance <= rangeCheck, distance, Latency:get_ping() / speed
+end;
+
+return {
+    ids = {
+        "7761286827"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+		
+		
+        
+        
+        
+        
+        
+        
+        
+
+        
+        
+        
+        
+        
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        return action    
+end    
+} 
+end)();
+tbl['LionfishBeam'] = (function() 
+return {
+    ids = {
+        "6372560712"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+		local target = defender.entity:FindFirstChild('Target');
+		target = target and target.Value;
+
+		if (target ~= local_player.character) then return end;
+
+		local wasUp = false;
+
+		repeat
+			local _, _, z = defender.entity:GetPivot():ToOrientation();
+
+			if (z < -1.7 and not wasUp) then
+				wasUp = true;
+			elseif (z > -1.5 and wasUp) then
+                action.when = math.min(0.1 - (Latency:get_ping() * 2));
+                action.offset = CFrame.new(0, 0, 0)
+                action.hitbox = Vector3.new(2500, 2500, 2500);
+                action.ignore_hitbox = true;
+                action.type = "Dodge";
+                action:push();
+				break			
+end;
+
+			task.wait();
+		until not self:is_playing() or not defender.entity.Parent;
+
+        return action    
+end    
+} 
+end)();
+tbl['LionfishTripleBite'] = (function() 
+return {
+    ids = {
+        "5680585677"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.45;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Lionfish Triple Bite 1";
+        action:push();
+
+        action.when = 1.15;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Lionfish Triple Bite 2";
+        action:push();
+
+        action.when = 1.85;
+        action.type = "Parry";
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(200, 150, 190);
+        action.name = "Lionfish Triple Bite 3";
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['LordsSlice'] = (function() 
+return {
+    ids = {
+        "11328614766"
+    },
+    action_type = "M1", 
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        local distance = self:distance();
+        action.when = math.min(0.375 + distance * 0.012)
+        action.type = "Parry"
+        action.hitbox = Vector3.new(100, 100, 100)
+        action.name = string.format("(%.2f) ContractorPull", distance)
+        
+        return action:push()    
+end    
+} 
+end)();
+tbl['MetalBallModule'] = (function() 
+return {
+    ids = {
+        "14953939237"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.5 - Latency:get_ping())
+        local spikeBall = defender.entity:WaitForChild("SpikeBall2", 0.1) or defender.entity:WaitForChild("SpikeBall", 0.1)
+    
+        while task.wait() do
+            if not spikeBall or not spikeBall.Parent then break end
+            if self:distance() <= 29.5 then
+		        action.when = 0
+                action.hitbox = Vector3.one * (29.5 * 2);
+                action.ignore_early_end = true;
+                action.shape = "ball";
+                action.name = "Metal Ball";
+                action:push();
+                break            
+end
+        end
+        return action    
+end    
+} 
+end)();
+tbl['MirrorIllusion'] = (function() 
+return {
+    ids = {
+        "87085678581483"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+        action.when = 0.6;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(50, 50, 50);
+        action.type = "Dodge"
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['OxidizingRush'] = (function() 
+return {
+    ids = {
+        "13567686046"
+    },
+    default_chance = 100,
+    allow_block_input = true,   
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local shoulds = 0;
+        action.type = "RPUE Parry";
+        action.when = math.max(0.2 + (self:distance() * 0.013));
+
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent and shoulds == 0        
+end;
+
+        action.wait = function()
+            task.wait(Latency:get_ping() / 2);
+        end
+
+        action.should = function()
+            local should = defender:in_hitbox(Vector3.new(25, 14, 15), CFrame.new(0,0,-7.5), false);
+            if should then
+                shoulds += 1;
+            end
+            return should        
+end;
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['PetrasCrit'] = (function() 
+return {
+    ids = {
+        "12071557016"
+    },
+    default_chance = 100,
+    allow_block_input = true,   
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.type = "Parry"
+        action.offset = CFrame.new(0,0,-25);
+        action.hitbox = Vector3.new(25, 25, 50)
+        action.name = "Petras Crit"
+        action.ignore_early_end = true;
+        action.when = math.max(self:distance() * 0.02);
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['PleetskysRunningCrit'] = (function() 
+return {
+    ids = { "18109641443" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    ignore_early_end = false,
+    action_type = "Critical",
+
+    run = function(action)
+        local hrp = defender.entity:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        local distance = self:distance() or 0
+        local sound = hrp:WaitForChild("REP_SOUND_15237686618", 0.1)
+        if not sound then return end
+
+        local when = distance <= 35 and 0.15 or 0.25
+
+        action.when = when
+        action.type = "Parry"
+        action.ignore_hitbox = true
+        action.name = string.format("Inferno Running Crit Far (%.1f dist, %.2f when)", distance, when)
+        
+        action:push()
+        return action
+    end
+}
+ end)();
+tbl['PrimadonGrab'] = (function() 
+return {
+    ids = {
+        "9225086332"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local mob = defender.entity
+        if not mob then return action end
+        
+        local hum = mob:FindFirstChild("Humanoid")
+        if not hum then return action end
+        
+        local timingValue = 0.9
+        
+        action.when = timingValue
+        action.type = "Dodge"
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(110, 250, 110)
+        action.name = "Primadon Grab"
+        
+        action:push()
+        return action
+    end    
+}
+ end)();
+tbl['PrimadonKick'] = (function() 
+return {
+    ids = {
+        "6438111139"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+
+    run = function(action)
+        local mob = defender.entity
+        if not mob then return action end
+        
+        local hum = mob:FindFirstChild("Humanoid")
+        if not hum then return action end
+        
+        local timingValue = mob.Name:match(".monkyking") and 0.6 or 0.9
+    
+        if hum.Health <= (hum.MaxHealth / 2) then
+            timingValue = timingValue / 1.25
+        end
+        
+        action.when = timingValue
+        action.type = "Dodge"
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(110, 250, 110)
+        action.name = "Primadon Kick"
+        
+        action:push()
+        return action
+    end    
+}
+ end)();
+tbl['PrimadonMidPunch'] = (function() 
+return {
+    ids = {
+        "8365199156"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local timingValue = (0.6 * 1.12)
+        
+        action.when = timingValue
+        action.type = "Parry"
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(110, 250, 110)
+        action.name = "Primadon Mid Punch"
+        
+        action:push()
+        return action
+    end    
+}
+ end)();
+tbl['PrimadonPunch'] = (function() 
+return {
+    ids = {
+        "9225081967"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local timingValue = (1.05 * 0.7) / track.Speed
+        
+        action.when = timingValue
+        action.type = "Parry"
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(80, 250, 120)
+        action.name = "Primadon Punch"
+        
+        action:push()
+        return action
+    end    
+}
+ end)();
+tbl['PrimadonStomp'] = (function() 
+return {
+    ids = { "9225098544" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    ignore_hitbox_check = false,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local mob = defender.entity
+        if not mob then return end
+
+        local hum = mob:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        local hitbox = Vector3.new(50, 250, 50)
+        if mob.Name:match(".monkyking") then
+            hitbox = Vector3.new(80, 250, 80)
+        end
+
+        local when = ((750 * 1.21) / track.Speed) / 1000
+        if hum.Health <= (hum.MaxHealth / 2) then
+            when = when / 1.21
+        end
+
+        action.when = when
+        action.type = "Parry"
+        action.hitbox = hitbox
+        action.name = "Primadon Stomp"
+
+        action:push()
+        return action
+    end
+}
+ end)();
+tbl['PrimadonTripleStomp'] = (function() 
+return {
+    ids = {
+        "6432260013"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local mob = defender.entity
+        if not mob then return action end
+        
+        local hum = mob:FindFirstChild("Humanoid")
+        if not hum then return action end
+        
+        local baseTimings = {0.8, 1.4, 2.05}
+        
+	    if mob.Name:match(".monkyking") and track.Speed >= 1.5 and track.Speed <= 1.7 then
+	    	baseTimings = {
+	    		[1] = 0.6,
+	    		[2] = 1,
+	    		[3] = 1.4,
+	    	}
+	    end
+    
+	    if mob.Name:match(".monkyking") and track.Speed >= 1.7 and track.Speed <= 2.15 then
+	    	baseTimings = {
+	    		[1] = 0.5,
+	    		[2] = 0.9,
+	    		[3] = 1.4,
+	    	}
+	    end
+
+        local multiplier = 1.0
+        if hum.Health <= (hum.MaxHealth / 2) then
+            multiplier = 1.25
+        end
+        
+        for i = 1, 3 do
+            local timingValue = baseTimings[i] / multiplier
+            
+            action.when = timingValue
+            action.type = "Parry"
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(110, 250, 110)
+            action.name = string.format("Primadon Triple Stomp %d", i)
+            action:push()
+        end
+        
+        return action
+    end    
+}
+ end)();
+tbl['ProminenceDraw'] = (function() 
+return {
+    ids = {
+        "12706574441"
+    },
+    default_chance = 100,
+    allow_block_input = true,   
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.type = "Parry"
+        action.offset = CFrame.new(0,0,0);
+        action.hitbox = Vector3.new(100, 100, 100)
+        action.name = "Prominence Draw"
+        action.when = math.max(0.33 + (self:distance() * (4 / 1000)));
+        action:push();
+        
+        return action    
+end    
+} 
+end)();
+tbl['PutridEdenstaff'] = (function() 
+return {
+    ids = {
+        "15250125394"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Critical", 
+
+    run = function(action)
+        action.when = 0.775;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(25, 25, 25);
+        action.type = "Parry"
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['RandomHeavyRunningAttack'] = (function() 
+
+return {
+    ids = { "5067090007" },
+    action_type = "M1",
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+
+    run = function(action)
+        if not weapon.type or not weapon.length then return end
+
+        local hrp = defender.entity:FindFirstChild("HumanoidRootPart")
+        local vel = hrp and Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z).Magnitude or 0
+
+        if vel >= 8 then
+            
+            action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 2.8)
+            action.offset = CFrame.new(0, 0, -5)
+            action.base_and_predict = true
+            action.predict = true
+
+            local windup = 0
+            if weapon.type == "Greataxe" then
+                windup = (0.150 / track.Speed) + 0.100
+                windup += 0.100 / weapon.ss
+            elseif weapon.type == "Greathammer" then
+                windup = (0.160 / track.Speed) + 0.180
+                windup += 0.100 / weapon.ss
+                action.hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 4)
+            end
+
+            action.name = string.format("Running Attack - %0.2f, %0.2f, %s", windup, weapon.length, weapon.type)
+            action.when = windup
+            action:push()
+        else
+            
+            action.base_and_predict = true
+            action.predict = true
+
+            local hitbox = Vector3.new(weapon.length * 2.65, weapon.length * 3, weapon.length * 2.8)
+            local windup = 0
+
+            if weapon.type == "Greataxe" and track.Speed ~= 1.0 then
+                windup = (0.171 / track.Speed) + 0.120
+            elseif weapon.type == "Greataxe" and track.Speed == 1.0 then
+                windup = (0.171 / track.Speed)
+                windup += 0.250 / (weapon.ss * (has_heavy_hands(defender.entity) and 0.9 or 1))
+            elseif weapon.type == "Greathammer" and track.Speed ~= 1.0 then
+                windup = (0.150 / track.Speed) + 0.150
+            elseif weapon.type == "Greathammer" and track.Speed == 1.0 then
+                windup = (0.150 / track.Speed)
+                windup += 0.250 / weapon.ss
+            end
+
+            action.name = string.format("%s M1 - %0.2f, %0.1f", weapon.type, windup * 2.351, weapon.length)
+            action.when = windup
+            action.offset = CFrame.new(0, 0, -5)
+            action.hitbox = hitbox
+            action:push()
+        end
+
+        return action
+    end
+}
+ end)();
+tbl['RapidPunches'] = (function() 
+return {
+    ids = {
+        "8150828674"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        if defender.entity:FindFirstChild("HumanoidRootPart") and defender.entity:FindFirstChild("HumanoidRootPart"):WaitForChild("REP_SOUND_6323221579", 0.1) then
+            action.when = 0.425;
+            action.name = "Radiant Kick"
+            action.offset = CFrame.new(0, 0, 0)
+            action.hitbox = Vector3.new(100, 100, 100);
+            action.ignore_early_end = true;
+            action.type = "Parry";
+            action:push();
+            return action        
+end;
+
+        action.when = 0.2;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(16, 10, 12);
+        action.type = "Parry";
+        action.ignore_feints = true;
+        action.name = "Rapid Punches";
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['RapidPunchesLoop'] = (function() 
+return {
+    ids = {
+        "8150846354"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.1;
+        action.offset = CFrame.new(0, 0, -3)
+        action.hitbox = Vector3.new(16, 10, 12);
+        action.type = "RPUE Parry";
+        action.condition = function()
+            return self:is_playing() and defender.entity.Parent        
+end;
+        
+        action.wait = function()
+            task.wait(Latency:get_ping() / 2);
+        end 
+
+        action.should = function()
+            return defender:in_hitbox(Vector3.new(16, 10, 12), CFrame.new(0, 0, -3), false)        
+end;
+        action.ignore_feints = true;
+        action.name = "Rapid Punches Loop";
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['RecallCrimsonRain'] = (function() 
+return {
+    ids = {
+        "73745318478429"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        local item = thrown:WaitForChild("BloodDagger_"..defender.entity.Name, 5);
+        if not item then return end;
+        while task.wait() do
+            local found = false;
+            for _, item in thrown:GetChildren() do
+                if item.Name == "BloodDagger_"..defender.entity.Name then
+                    if general:in_hitbox(local_player.root_part.CFrame, item.CFrame, Vector3.new(25, 10, 35 + (80 * Latency:get_ping())), CFrame.new(0, 0, 25), true) then
+
+                        action.when = 0;
+		                action.type = "Parry" 
+                        action.ignore_hitbox = true;
+                        action.ignore_early_end = true;
+		                action.name = string.format("CrimsonRainRecall (%.2f)", self:distance())
+                        action:push();
+                        return action                    
+end
+                    found = true;
+                end 
+            end
+
+            if not found then break end
+        end
+
+        return action    
+end    
+} 
+end)();
+tbl['Revenge'] = (function() 
+return {
+  ids = {
+      "8066909599"
+  },
+  default_chance = 100,
+  allow_block_input = true,
+  allow_parry_to_roll = true,
+  allow_roll_to_parry = true,
+  allow_parry_to_block = true,
+  action_type = "Spell", 
+
+  run = function(action)
+	  local data = mantra.data(defender.entity, "Mantra:RevengeAgility{{Revenge}}")
+	  local range = data.rush * 12 + data.drift * 6
+
+    action.when = 0.4;
+    action.offset = CFrame.new(0, 0, 0)
+    action.hitbox = Vector3.new(20, 20, 30 + range)
+    action.half_size_offset = true;
+
+    action:push();
+
+    return action  
+end    
+} 
+end)();
+tbl['RisingShadow'] = (function() 
+return {
+    ids = {
+        "9149348937"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.4;
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(10, 10, 10);
+        action.type = "Parry";
+        action.ignore_feints = true;
+        action.no_more_actions = true;
+        action.name = "Rising Shadow";
+        action:push();
+        action.when = 0.6;
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(15, 15, 15);
+        action.type = "Parry";
+        action.ignore_feints = true;
+        action.no_more_actions = true;
+        action.name = "Rising Shadow";
+        action:push();
+        action.when = 0.9;
+        action.offset = CFrame.new(0, 0, 0);
+        action.hitbox = Vector3.new(18, 18, 18);
+        action.type = "Parry";
+        action.ignore_feints = true;
+        action.name = "Rising Shadow";
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['RisingThunder'] = (function() 
+return {
+    ids = { "15214200859" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    ignore_early_end = false,
+
+    run = function(action)
+        local distance = self:distance() or 0
+        
+        local parryTime = 0.35  
+        
+        if distance >= 40 then
+            parryTime = 0.60
+        elseif distance >= 30 then
+            parryTime = 0.60
+        elseif distance >= 20 then
+            parryTime = 0.60
+        elseif distance >= 10 then
+            parryTime = 0.57
+        elseif distance >= 6 then
+            parryTime = 0.35
+        end
+        
+        action.when = parryTime
+        action.type = "Parry"
+        action.hitbox = Vector3.new(20.5, 13, 45.5)
+        action.offset = CFrame.new(0, 0, -10)
+        action.name = string.format("Rising Thunder (%.2f dist, %.2f time)", distance, parryTime)
+        action:push()
+
+        return action
+    end
+}
+ end)();
+tbl['RisingThunderEnd'] = (function() 
+return {
+    ids = {
+        "12333759044"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action) 
+        task.wait(0.9);
+        if defender.entity:GetPivot().Y < local_player.root_part.CFrame.Y + 10 then return end
+
+        action.when = 1.1 - 0.9;
+        action.ignore_early_end = true;
+        action.type = "Start Block"
+        action.hitbox = Vector3.new(30, 100, 40) 
+        action:push()
+        return action    
+end    
+} 
+end)();
+tbl['RockmallerCrit'] = (function() 
+return {
+    ids = {
+        "85298007288557"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Critical", 
+
+    run = function(action)
+        action.when = 0.425;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(22, 12, 25);
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ShadowAssault'] = (function() 
+return {
+    ids = {
+        "6318273143"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    action_type = "Spell", 
+
+    run = function(action)
+
+        
+        
+    
+        action.when = self:distance() <= 18 and 0.6 or math.min(600 + self:distance() * 4) / 1000;
+        action.hitbox = Vector3.new(40, 40, 40)
+        action.offset = CFrame.new(0,0,-20);
+        action.name = string.format("(%.2f) Shadow Assault", self:distance());
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['ShadowEruption-Generic'] = (function() 
+return {
+    ids = {
+        "8018953639"
+    },
+    default_chance = 100, 
+
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+	    local distance = self:distance()
+	    local data = mantra.data(defender.entity, "Mantra:EruptionShadow{{Shadow Eruption}}")
+	    local dataTwo = mantra.data(defender.entity, "Mantra:RestraintShadow{{Shadow Chains}}")
+	    local size = data.stratus * 5.5 + data.cloud * 4.5
+	    local range = dataTwo.perfect * 8 + dataTwo.crystal * 6
+		local root = defender.entity:FindFirstChild("HumanoidRootPart")
+		if not root then
+			return print("..?")
+		end
+			
+	    if root:FindFirstChild("REP_SOUND_5188185503") then
+	    	
+	    	
+	    	
+	    	
+
+        	task.wait(0.6 - Latency:get_ping());
+
+			local chain_portal_ice do
+        	    for _, chain_portal in workspace.Thrown:GetChildren() do
+        	        if chain_portal.Name ~= "ChainPortalIce" then
+        	            continue        	        
+end
+
+        	        if (chain_portal.Position - local_player.root_part.Position).Magnitude > 20 then
+        	            continue        	        
+end
+
+        	        chain_portal_ice = chain_portal;
+        	    end;
+        	end;
+        	if not chain_portal_ice then return end
+        	chain_portal_ice:WaitForChild("Beam");
+        	repeat task.wait() until chain_portal_ice.Beam.Enabled;
+        	action.when = 0.5;
+        	action.ignore_early_end = true;
+        	action.hitbox = Vector3.new(50, 50, 50);
+        	action.offset = CFrame.new(0, 0, 0)
+        	action.ignore_hitbox = true;
+
+        	action:push();
+	    elseif thrown:FindFirstChild("ChainPortalShadow") then
+	    	action.when = math.min(0.200 + distance * 0.006)
+	    	action.hitbox = Vector3.new(55 + range, 55 + range, 55 + range)
+	    	action.name = "Shadow Chains"
+	    else
+	    	action.when = 0
+	    	action.hitbox = Vector3.new(35 + size, 35 + size, 35 + size)
+	    	action.name = "Shadow Eruption"
+	    end
+
+		action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['ShadowMeteors'] = (function() 
+return {
+    ids = {
+        "6701095669"
+    },
+    default_chance = 100,
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        local start = tick();
+        local has_ice_dagger = true;
+        local a = {};
+        while tick() - start < 2 or has_ice_dagger do
+            has_ice_dagger = false;
+            for _, child in workspace.Thrown:GetChildren() do
+                if child.Name ~= "ImpactIndicator" or a[child] then continue end
+                has_ice_dagger = true;
+                a[child] = true;
+
+                task.wait(0.5 - Latency:get_ping());
+                if general:in_hitbox(local_player.root_part.CFrame, child.CFrame, child.Size + Vector3.new(25,30,25), CFrame.new(0,0,0), true) then
+                    action.type = "Parry";  
+                    action.when = 0;
+                    action.name = string.format("%.2f Shadow Meteor", (child.Position - local_player.root_part.Position).Magnitude);
+                    action.ignore_hitbox = true;
+                    action.ignore_early_end = true;
+                    action:play()
+                end;
+            end;
+            task.wait();
+        end;
+
+        action.actions = {};
+        return action    
+end    
+} 
+end)();
+tbl['ShadowRoar'] = (function() 
+return {
+    ids = {
+        "7620630583"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+    
+        
+        
+        
+        
+        
+        action.when = 0.45;
+        action.ignore_early_end = true;
+        action.offset = CFrame.new(0,0,-20);
+        action.hitbox = Vector3.new(30, 30, 30);
+        action.type = "RPUE Parry";
+        action.condition = function()
+            return (workspace.Thrown:FindFirstChild("RoarParticles") or self:is_playing()) and defender.entity.Parent        
+end;
+
+        action.wait = function()
+            task.wait(Latency:get_ping() / 2);
+        end
+
+        action.should = function()
+            return defender:in_hitbox(Vector3.new(30, 30, 30), CFrame.new(0,0,-15), true)        
+end;
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['SharkoCero'] = (function() 
+return {
+    ids = {
+        "91389074160755"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        repeat
+            task.wait()
+        until track.TimePosition >= 2.85
+    
+        action.when = 0
+        action.type = "Dodge"
+        action.hitbox = Vector3.new(50, 65, 145)
+        action.name = string.format("(%.2f) Sharko Cero", track.Speed)
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['SilentheartHeavyRising'] = (function() 
+return {
+    ids = { "139465383955578" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+
+    run = function(action)
+        action.when = track.Speed <= 1.1 and 0.5 or 0.4
+        action.type = "Parry"
+        action.hitbox = Vector3.new(40, 40, 40)
+        action.name = ("Silentheart Heavy Rising Star")
+        action:push()
+
+        return action
+    end
+}
+ end)();
+tbl['SilentheartMayhemHeavy'] = (function() 
+return {
+    ids = {
+        "81062541535552"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+
+        repeat
+            task.wait()
+        until track.TimePosition >= 0.615
+    
+        action.type = "Parry"
+        action.name = "Silentheart Mayhem Heavy"
+        action.hitbox = Vector3.new(30, 50, 30);
+        action:push()
+        return action    
+end    
+} 
+end)();
+tbl['SilentheartMayhemLight'] = (function() 
+return {
+    ids = { "85523657178401" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    ignore_early_end = false,
+
+    run = function(action)
+        local distance = self:distance() or 0
+        local speed = track.Speed
+        local when
+
+        if speed >= 0.7 then
+            when = 0.15
+        else
+            when = 0.18
+        end
+
+        if distance >= 10 then
+            when = when + 0.03
+        end
+
+        if distance >= 20 then
+            when = when + 0.04
+        end
+
+        if distance >= 40 then
+            when = when + 0.45
+        end
+
+        when = math.clamp(when, 0.15, 0.80)
+
+        action.when = when
+        action.type = "Parry"
+        action.hitbox = Vector3.new(20, 40, 40)
+        action.offset = CFrame.new(0, 0, -20)
+        action.name = string.format("(speed:%.2f dist:%.2f when:%.3f) Light Mayhem Silentheart", speed, distance, when)
+
+        action:push()
+        return action
+    end
+}
+ end)();
+tbl['SilentheartMayhemMedium'] = (function() 
+return {
+    ids = { "132164383275060" },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    ignore_early_end = false,
+
+    run = function(action)
+        local distance = self:distance() or 0
+        local speed = track.Speed
+        local when = 0.45
+
+        if speed >= 0.7 then
+            when = 0.40
+        end
+
+        if distance >= 10 then
+            when = when + 0.025
+        end
+
+        if distance >= 20 then
+            when = when + 0.025
+        end
+
+        action.when = when
+        action.type = "Parry"
+        action.offset = CFrame.new(0,0,-20)
+        action.hitbox = Vector3.new(20, 15, 45)
+        action.name = "Silentheart Medium Mayhem"
+
+        action:push()
+        return action
+    end
+}
+ end)();
+tbl['SoulflareSiphon'] = (function() 
+return {
+    ids = {
+        "14428696078"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        action.when = math.max(0.3 + (self:distance() * 0.013));
+        action.offset = CFrame.new(0,0,-7.5);
+        action.hitbox = Vector3.new(20, 30, 16);
+        action.type = "Parry"
+        action.name = string.format("Soulflare Siphon %.2f %.2f", self:distance(), track.Speed)
+        action:push()
+
+
+        return action    
+end    
+} 
+end)();
+tbl['SquidwardEruption'] = (function() 
+return {
+    ids = {
+        "6922310516"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        local distance = self:distance()
+        local speed = track.Speed;
+        local low_speed_variant = speed >= 0.2 and speed <= 0.3;
+
+        action.when_ms = low_speed_variant and 975 or 450 + (distance * 4)
+        action.type = low_speed_variant and "Jump" or "Dodge"
+        action.hitbox = Vector3.new(40, 40, 50)
+        action.name = string.format("(%.2f) (%.2f) Squidward Eruption", distance, track.Speed)
+        action:push()
+
+        return action    
+end    
+} 
+end)();
+tbl['StoneKnightSlash'] = (function() 
+return {
+    ids = {
+        "85401018793125"
+    },
+    action_type = "Spell", 
+    default_chance = 100, 
+
+    allow_block_input = false,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = false,
+
+    run = function(action)
+        task.wait(0.6 - Latency:get_ping());
+
+        action.name = "Stone Knight Slash";
+        action.when = 0;
+        action.offset = CFrame.new(0, 0, -15)
+        action.hitbox = Vector3.new(15,20,30);
+                
+        action:push();
+
+        if general:in_hitbox(local_player.root_part.CFrame, defender.entity.HumanoidRootPart.CFrame, Vector3.new(15,20,35), CFrame.new(0, 0, -10), false) then return action end
+
+        local has_javelin = false;
+        local start = tick();
+
+        while tick() - start < 1 or has_javelin do
+            has_javelin = false;
+            for _, object in workspace:WaitForChild("Thrown"):GetChildren() do
+                if object.Name ~= "WindSlashProjectileBigSnow" then continue end
+
+                has_javelin = true;
+                if general:in_hitbox(local_player.root_part.CFrame, object.CFrame, Vector3.new(10, 10, 80), CFrame.new(0, 0, -40), false) then 
+                    action.name = "Stone Knight Slash";
+                    action.when = 0;
+                    action.offset = CFrame.new(0, 0, -15)
+                    action.ignore_hitbox = true;
+                    action.ignore_early_end = true;
+
+                    action:push();
+                
+                    return action                
+end
+            end;
+            task.wait();
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['StrongLeft'] = (function() 
+return {
+    ids = {
+        "8085349676"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        action.when = 0.5
+        action.hitbox = Vector3.new(23, 15, 25);
+        action.type = "Parry"
+        action.name = string.format("Strong Left %.2f %.2f", self:distance(), track.Speed)
+        
+	    if defender.entity.Name:match(".theduke") then
+            action.ignore_hitbox = true;
+	    end;
+
+        action:push()
+
+
+        return action    
+end    
+} 
+end)();
+tbl['Taunt'] = (function() 
+return {
+    ids = {
+        "8198764550"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action) 
+        local allowed = false;
+        local conn = defender.entity.DescendantAdded:Connect(function(item)
+            if item.Name ~= "REP_SOUND_4953084421" then return end
+            allowed = true;
+        end);
+        local wait_amount = 0.5 - Latency:get_ping();
+        task.wait(wait_amount);
+        conn:Disconnect();
+        if not allowed then return end
+        action.type = "Parry";
+        action.when = 0;
+        action.hitbox = Vector3.new(15, 30, 20);
+        action.offset = CFrame.new(0,0,-10);
+        action.ignore_early_end = true;
+        action:push()
+
+        return action    
+end    
+} 
+end)();
+tbl['ThresherBite'] = (function() 
+return {
+    ids = {
+        "8226933122"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true, 
+    allow_parry_to_block = false,
+
+    run = function(action)
+        action.when = 0.4;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(40, 30, 40);
+                
+        action:push();
+
+        action.when = 0.45 * 2;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(40, 30, 40);
+                
+        action:push();
+
+        action.when = 1.45;
+        action.offset = CFrame.new(0, 0, 0)
+        action.hitbox = Vector3.new(40, 30, 40);
+                
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['TitusLariat'] = (function() 
+return {
+    ids = {
+    "93803643628347"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    ignore_hitbox_check = false,
+    ignore_early_end = false,
+
+    run = function(action)
+        local distance = self:distance();
+        local mob = defender.entity
+        if not mob then
+            action:push();
+            return action        
+end
+        
+        if mob.Name:match(".titus") then
+
+            action.when = 0.7;
+            action.offset = CFrame.new(0, 0, -20);
+            action.hitbox = Vector3.new(20, 50, 40);
+            action.type = "Dodge";
+            action.name = "TitusLariat";
+        else
+            if distance > 15 then
+                action.when = 0.7;
+            else
+                action.when = 0.4;
+            end
+            action.offset = CFrame.new(0, 0, -20);
+            action.hitbox = Vector3.new(10, 10, 30);
+            action.type = "Parry";
+            action.name = "SovereignLariat";
+        end
+        
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['TitusSkycrash'] = (function() 
+return {
+    ids = {
+    "118932415770119"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    ignore_hitbox_check = false,
+    ignore_early_end = false,
+
+    run = function(action)
+        local mob = defender.entity
+        if not mob then
+            action:push();
+            return action        
+end
+        
+        if mob.Name:match(".titus") then
+
+action.hitbox = Vector3.new(0,0,0);
+action.offset = CFrame.new(0,0,0);
+action.when = 1;
+action.type = "";
+action:push();
+action.delay_until_in_hitbox = false;
+action.hitbox = Vector3.new(210,100,130);
+action.offset = CFrame.new(0,0,0);
+action.when = 1.3;
+            action.type = "Dodge";
+            action.name = "TitusSkycrash";
+        else
+
+            action.when = 0.1;
+            action.offset = CFrame.new(0, 0, -20);
+            action.hitbox = Vector3.new(10, 10, 30);
+            action.type = "Parry";
+            action.name = "SovereignSkycrash";
+        end
+        
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['TitusThrow'] = (function() 
+return {
+    ids = {
+        "128613582420698"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    ignore_hitbox_check = false,
+    ignore_early_end = false,
+
+    run = function(action)
+        local mob = defender.entity if not mob then
+            action:push();
+            return action        
+end
+        
+        if mob.Name:match(".titus") then
+
+            action.when = 0.45;
+            action.offset = CFrame.new(0, 0, 0);
+            action.hitbox = Vector3.new(34, 34, 34);
+            action.type = "Dodge";
+            action.name = "TitusThrow";
+        else
+
+            action.when = 0.45;
+            action.offset = CFrame.new(0, 0, 0);
+            action.hitbox = Vector3.new(34, 34, 34);
+            action.type = "Parry";
+            action.name = "TitusThrow";
+        end
+        
+        action:push();
+        return action    
+end    
+} 
+end)();
+tbl['TwisterKicks'] = (function() 
+return {
+    ids = {
+        "16394277950"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        
+        task.wait(0.3 - Latency:get_ping())
+
+        local start = tick();
+        while self:is_playing() and tick() - start < 0.5 do            
+            if defender:in_hitbox(Vector3.new(15,15,21), CFrame.new(0,0,0), true, true, 0, true, true) then
+
+           		action.ignore_early_end = true;
+           		action.name = "Twister Kicks"
+           		action.when = 0;
+           		action.type = "Parry"
+           		action.ignore_hitbox = true;
+                action.detect_gale_feint = true;
+
+           		action:push();
+                return action            
+end;
+            
+            task.wait(1 / 30);
+        end;
+
+        return action    
+end    
+} 
+end)();
+tbl['WardensBlade'] = (function() 
+return {
+    ids = {
+        "5786525661"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.when = 0.4;
+        action.offset = CFrame.new();
+        action.hitbox = Vector3.new(300, 300, 300)
+        action.type = "RPUE Parry";
+        action.ignore_early_end = true;
+        action.condition = function()
+            local center = defender.entity:FindFirstChild("IceBladeCenter")
+            if not center then
+                return
+            end
+    
+            if not center:FindFirstChild("IceSword") then
+                return
+            end
+
+            return defender.entity.Parent        
+end;
+
+        action.wait = function()
+            task.wait(0.15 - (Latency:get_ping() / 2));
+        end
+
+        action.should = function()
+            return self:distance() <= 10
+        end;
+
+        action:push();
+
+        return action    
+end    
+} 
+end)();
+tbl['WindCarve'] = (function() 
+return {
+    ids = {
+        "6466993564"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+
+    run = function(action)
+        action.type = "Parry"
+        action.when = 0.4;
+
+        action.offset = CFrame.new(0,0,-7.5);
+        action.hitbox = Vector3.new(20, 20, 30) 
+        action:push()
+        return action    
+end    
+} 
+end)();
+tbl['WindGun'] = (function() 
+return {
+    ids = {
+        "8310877920"
+    },
+    default_chance = 100,
+    allow_block_input = true,
+    allow_parry_to_roll = true,
+    allow_roll_to_parry = true,
+    allow_parry_to_block = true,
+    
+
+    run = function(action)
+        local distance = self:distance()
+        action.when = 0.4
+    
+        if distance >= 20 then
+            action.when = 0.55
+        end
+    
+        action.type = "Parry"
+        action.name = string.format("%.2f Wind Gun", distance)
+        action.hitbox = Vector3.new(30, 20, 40) 
+        action:push()
+        return action    
+end    
+} 
+end)();
+return tbl]];
+module_map["src/features/auto-parry/data/chance_store"] = [[
+return LPH_NO_VIRTUALIZE(function()
+    local chance_store = {} do
+        chance_store.__index = chance_store;
+
+        local OUTCOME_ORDER = { "Parry", "Dodge", "Skip" }
+        local OUTCOME_LOOKUP = {
+            ["Parry"] = true,
+            ["Dodge"] = true,
+            ["Skip"] = true,
+        }
+
+        local function clamp_chance(value)
+            local num = tonumber(value)
+            if not num then
+                return 100
+            end
+
+            if num < 0 then
+                return 0
+            end
+
+            if num > 100 then
+                return 100 
+            end
+
+            return num 
+        end
+ 
+        function chance_store.new()
+            local instance = setmetatable({}, chance_store)
+            instance.chances = {}
+
+            if isfile("Project Rain/post-rc-260421-parry-chances.json") then
+                local data = game:GetService("HttpService"):JSONDecode(readfile("Project Rain/post-rc-260421-parry-chances.json"))
+                instance:load_chances(data)
+            end
+
+            return instance
+        end
+
+        function chance_store:normalize_outcome_actions(actions)
+            local selected = {}
+
+            if typeof(actions) == "string" then
+                if OUTCOME_LOOKUP[actions] then
+                    selected[actions] = true
+                end
+            elseif typeof(actions) == "table" then
+                if #actions > 0 then
+                    for _, action in ipairs(actions) do
+                        if OUTCOME_LOOKUP[action] then
+                            selected[action] = true
+                        end
+                    end
+                else 
+                    for action, enabled in pairs(actions) do
+                        if enabled and OUTCOME_LOOKUP[action] then
+                            selected[action] = true
+                        end
+                    end
+                end
+            end
+
+            local normalized = {}
+            for _, action in ipairs(OUTCOME_ORDER) do
+                if selected[action] then
+                    table.insert(normalized, action)
+                end
+            end
+
+            if #normalized == 0 then
+                normalized = { "Skip" }
+            end
+
+            return normalized
+        end
+
+        function chance_store:normalize_outcome_weights(weights)
+            local normalized = {}
+
+            if typeof(weights) == "string" then
+                if OUTCOME_LOOKUP[weights] then
+                    normalized[weights] = 100
+                end
+            elseif typeof(weights) == "table" then
+                if #weights > 0 then
+                    for _, action in ipairs(weights) do
+                        if OUTCOME_LOOKUP[action] then
+                            local current = normalized[action]
+                            if current == nil then
+                                current = 0
+                            end
+
+                            normalized[action] = current + 1
+                        end
+                    end
+                else
+                    for action, amount in pairs(weights) do
+                        if not OUTCOME_LOOKUP[action] then
+                            continue
+                        end
+
+                        if typeof(amount) == "number" then
+                            normalized[action] = math.max(0, amount)
+                        elseif amount then
+                            normalized[action] = 1
+                        end
+                    end
+                end
+            end
+
+            local total = 0
+            for _, action in ipairs(OUTCOME_ORDER) do
+                local amount = normalized[action]
+                if amount == nil then
+                    amount = 0
+                end
+
+                total = total + amount
+            end
+
+            if total <= 0 then
+                normalized = { Skip = 100 }
+            end
+
+            return normalized
+        end
+
+        function chance_store:legacy_to_outcome_weights(chance, fail_weights)
+            local safe_chance = clamp_chance(chance)
+            local normalized_fail_weights = self:normalize_outcome_weights(fail_weights)
+            local total_fail = 0
+
+            for _, action in ipairs(OUTCOME_ORDER) do
+                if action ~= "Parry" then
+                    local amount = normalized_fail_weights[action]
+                    if amount == nil then
+                        amount = 0
+                    end
+
+                    total_fail = total_fail + amount
+                end
+            end
+
+            local parry_weight = safe_chance
+            local remainder = math.max(0, 100 - parry_weight)
+            local outcome_weights = {
+                Parry = parry_weight,
+                Dodge = 0,
+                Skip = 0,
+            }
+
+            if total_fail <= 0 then
+                outcome_weights.Skip = remainder
+                return self:normalize_outcome_weights(outcome_weights)
+            end
+
+            for _, action in ipairs(OUTCOME_ORDER) do
+                if action ~= "Parry" then
+                    local part = normalized_fail_weights[action]
+                    if part == nil then
+                        part = 0
+                    end
+
+                    if part > 0 then
+                        outcome_weights[action] = remainder * (part / total_fail)
+                    end
+                end
+            end
+
+            return self:normalize_outcome_weights(outcome_weights)
+        end
+
+        function chance_store:normalize_entry(entry)
+            if typeof(entry) == "number" then
+                local outcome_weights = self:legacy_to_outcome_weights(entry, { Skip = 100 })
+                return {
+                    chance = clamp_chance(entry),
+                    fail_actions = { "Skip" },
+                    fail_weights = { Skip = 100 },
+                    outcome_weights = outcome_weights,
+                }
+            end
+
+            if typeof(entry) ~= "table" then
+                local outcome_weights = self:legacy_to_outcome_weights(100, { Skip = 100 })
+                return {
+                    chance = 100,
+                    fail_actions = { "Skip" },
+                    fail_weights = { Skip = 100 },
+                    outcome_weights = outcome_weights,
+                }
+            end
+
+            local chance = clamp_chance(entry.chance or entry.value or entry.percent)
+            local fail_actions = self:normalize_outcome_actions(entry.fail_actions or entry.on_fail)
+            local fail_weights = self:normalize_outcome_weights(entry.fail_weights or fail_actions)
+            local outcome_weights = self:normalize_outcome_weights(entry.outcome_weights)
+
+            if not entry.outcome_weights then
+                outcome_weights = self:legacy_to_outcome_weights(chance, fail_weights)
+            end
+
+            fail_actions = {}
+            for _, action in ipairs(OUTCOME_ORDER) do
+                local weight = fail_weights[action]
+                if weight ~= nil and weight > 0 then
+                    table.insert(fail_actions, action)
+                end
+            end
+
+            if #fail_actions == 0 then
+                fail_actions = { "Skip" }
+            end
+
+            return {
+                chance = chance,
+                fail_actions = fail_actions,
+                fail_weights = fail_weights,
+                outcome_weights = outcome_weights,
+            }
+        end
+
+        function chance_store:add_chance(id: string, chance_or_outcome_weights, fail_actions_or_weights)
+            local payload = {}
+
+            if typeof(chance_or_outcome_weights) == "table" then
+                payload.outcome_weights = chance_or_outcome_weights
+            else
+                payload.chance = clamp_chance(chance_or_outcome_weights)
+
+                if typeof(fail_actions_or_weights) == "table" and #fail_actions_or_weights == 0 then
+                    payload.fail_weights = fail_actions_or_weights
+                else
+                    payload.fail_actions = fail_actions_or_weights
+                end
+            end
+
+            self.chances[id] = self:normalize_entry(payload)
+        end
+
+        function chance_store:get_entry(id: string)
+            local entry = self.chances[id]
+            if entry == nil then
+                return nil
+            end
+
+            local normalized = self:normalize_entry(entry)
+            self.chances[id] = normalized
+
+            return normalized
+        end
+
+        function chance_store:get_chance(id: string): number?
+            local entry = self:get_entry(id)
+            return entry and entry.chance or nil
+        end
+
+        function chance_store:get_fail_actions(id: string)
+            local entry = self:get_entry(id)
+            return entry and entry.fail_actions or nil
+        end
+
+        function chance_store:get_fail_weights(id: string)
+            local entry = self:get_entry(id)
+            return entry and entry.fail_weights or nil
+        end
+
+        function chance_store:get_outcome_weights(id: string)
+            local entry = self:get_entry(id)
+            return entry and entry.outcome_weights or nil
+        end
+
+        function chance_store:load_chances(data)
+            for id, entry in pairs(data) do
+                self.chances[id] = self:normalize_entry(entry)
+            end
+
+            self.loaded = true;
+            if self.on_load_function then
+                self:on_load_function();
+            end;
+        end
+
+        function chance_store:save_chances()
+            local data = game:GetService("HttpService"):JSONEncode(self.chances)
+            writefile("Project Rain/post-rc-260421-parry-chances.json", data)
+        end
+
+        function chance_store:on_load(f)
+            f();
+
+            self.on_load_function = f;
+        end;
+    end;
+
+    return chance_store.new()
+end)()]];
+module_map["src/features/auto-parry/data/effect-action"] = [[
+local action = require("@src/features/auto-parry/data/action")
+
+
+return {
+    new = function()
+        return action.new({ signal = true })
+    end,
+}]];
+module_map["src/features/auto-parry/data/effects/EnforcerPull"] = [[
+return {
+    id = "EnforcerPull",
+    
+    run = function(action, data)
+        if not (string.find(data.char.Name, '.enforcer')) then return end;
+        if (data.targ ~= local_player.character) then return end;
+        if not aztup.flags.no_enforcer_pull then return end
+
+        task.spawn(function()
+            local bp = local_player.root_part:WaitForChild("BodyPosition", 1);
+            if bp then
+                bp:Destroy();
+            end;
+        end);
+
+        return    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/EthironPointSpikes"] = [[
+return {
+    id = "EthironPointSpikes",
+
+    run = function(action, data)
+        local ethiron;
+        for _, entity in workspace:WaitForChild("Live"):GetChildren() do
+            if entity.Name:match(".avatar") then
+                ethiron = entity;
+                break            
+end;
+        end;
+
+        for _, point in next, data.points do
+            if (point.pos - local_player.root_part.Position).Magnitude < 20 then
+                action.ignore_hitbox = true;
+                action.offset = CFrame.new();
+                action.type = "Dodge";
+                action.when = 0.6;
+                action.user = ethiron;
+                action:play();                  
+                break
+            end
+        end
+
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/GenericTelegraph"] = [[
+return {
+    id = "GenericTelegraph",
+    
+    run = function(action, data)
+        local l_char_0 = data.char;
+        local l_part_0 = data.part;
+        local l_telegraph_0 = data.telegraph;
+
+        if l_part_0 == local_player.root_part and l_char_0 == local_player.character then 
+            local dur = data.dur or 0.5;
+
+            if dur ~= 1 then
+                return action            
+end
+
+            if not table.find({
+                "dodge_only",
+                "block_only",
+                "parry_only"
+            }, l_telegraph_0) then return action end
+            
+            action.ignore_hitbox = true;
+            action.offset = CFrame.new();
+            action.type = l_telegraph_0 == "dodge_only" and "Dodge" or "Parry";
+            action.when = 0.95;
+            action.user = l_char_0;
+            action:play();                  
+        end
+        
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/GolemLaserFire"] = [[
+return {
+    allow_block_input = true,
+    id = "GolemLaserFire",
+
+    run = function(action, data)
+        
+        local l_mob_0 = data.mob;
+        local l_aimPos_0 = data.aimPos;
+        
+        
+        if not l_mob_0 or not l_aimPos_0 then return end;
+        local distance = local_player.root_part.Position - l_aimPos_0;
+
+        if distance.Magnitude > 30 or l_mob_0:FindFirstChild("Target") and l_mob_0:FindFirstChild("Target").Value ~= local_player.character then return end;
+
+        action.ignore_hitbox = true;
+        action.offset = CFrame.new();
+        action.type = "Dodge";
+        action.when = 0.2;
+        action.user = l_mob_0;
+        action:play();                  
+        
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/IceRise"] = [[
+return {
+    id = "IceRise",
+
+    run = function(action, data)
+        local char;
+        for _, entity in workspace.Live:GetChildren() do
+            if entity.Name:find(".kyrsgarde_champion") then
+                char = entity;
+                break            
+end;
+        end
+
+        if not char then return end
+        
+        action.ignore_hitbox = true;
+        action.offset = CFrame.new();
+        action.type = "Parry";
+        action.when = 0.35;
+        action.user = char;
+        action.allow_parry_to_roll = true;
+        action:play();
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/LightningSemtex"] = [[
+return {
+    id = "LightningSemtex",
+
+    run = function(action, data)
+        if data.command ~= "startAttack" then return end
+        
+        local l_char_2 = data.char;
+        local l_dur_6 = data.dur;
+        local l_size_4 = data.size;
+
+        if l_char_2 ~= local_player.character then
+            return        
+end;
+
+        local user;
+        for _, player in services.Players:GetPlayers() do
+            if player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Mantra:CarveLightning{{Electro Carve}}", true) and player.Backpack:FindFirstChild("Mantra:CarveLightning{{Electro Carve}}", true):GetAttribute("RichStats"):match("Magnet") then
+                user = player.Character;
+                break            
+end;
+        end;
+
+        if not user then return end;
+        
+        local t = 0.1 - Latency:get_ping();
+        task.wait(t);
+        
+        l_dur_6 -= t * 2;
+
+        local start = tick();
+        repeat
+            if not general:in_hitbox(local_player.root_part.CFrame, local_player.root_part.CFrame, Vector3.new(l_size_4, l_size_4, l_size_4), CFrame.new(), aztup.flags.view_hitboxes) then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.offset = CFrame.new();
+            action.type = "Parry";
+            action.when = 0;
+            action.user = user;
+            action:play();            
+            task.wait(0.1);
+        until tick() - start > l_dur_6;
+
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/OwlDisperse"] = [[
+return {
+    id = "OwlDisperse",
+
+    run = function(action, data)
+        local char = data.Character;
+        if not char then return end;
+
+        local target = char:FindFirstChild('Target');
+        if (not target or target.Value ~= local_player.character) then return end;
+
+        local startedAt = tick();
+        local duration = data.Duration or data.dur or 0;
+
+        task.wait(duration / 3);
+
+        while (tick() - startedAt <= duration + 0.3) do
+            action.ignore_hitbox = true;
+            action.offset = CFrame.new();
+            action.type = "Parry";
+            action.when = 0;
+            action.user = char;
+            action.allow_parry_to_roll = true;
+            action:play();
+            task.wait(0.2);
+        end;
+
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/ProvidenceThorns"] = [[
+return {
+    allow_block_input = true,
+    id = "DisplayThorns",
+    name = "ProvThornsEffect",
+
+    run = function(action, data)
+        if (data.Character ~= local_player.character) then return end;
+
+        action.ignore_hitbox = true;
+        action.offset = CFrame.new();
+        action.type = "Parry";
+        action.when = data.Time - data.Window;
+        action.user = data.Wep:FindFirstAncestorWhichIsA("Model");
+        action:play(); 
+
+        return    
+end;
+}  ]];
+module_map["src/features/auto-parry/data/effects/ShadowEncircle"] = [[
+return {
+    id = "ShadowEncircle",
+
+    run = function(action, data) 
+        local l_target_0 = data.target;
+        if not l_target_0 or l_target_0 ~= local_player.character then return end;
+        local user;
+        for _, player in services.Players:GetPlayers() do
+            if player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Mantra:EncircleShadow{{Encircle}}", true) then
+                user = player.Character;
+                break            
+end;
+        end;
+        if not user then return end;
+
+        action.ignore_hitbox = true;
+        action.offset = CFrame.new();
+        action.type = "Parry";
+        action.when = 0.75;
+        action.user = user;
+        action:play();                  
+        
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/SilentheartWarn"] = [[
+return {
+    id = "SilentheartWarn",
+
+    run = function(action, data)
+        local hrp = local_player.character and local_player.character:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            return
+        end
+
+        local user = data and data.caster
+        if not user then return end
+
+        local recolor = nil
+        repeat
+            task.wait()
+            for _, child in next, hrp:GetChildren() do
+                if child:IsA("Attachment") then
+                    local found = child:FindFirstChild("Recolor")
+                    if found and found:IsA("ParticleEmitter") then
+                        recolor = found
+                        break
+                    end
+                end
+            end
+        until recolor
+
+        action.user = user
+        action.ignore_hitbox = true
+        action.offset = CFrame.new()
+        action.type = "Parry"
+        action.when = 0.25
+        action.name = "Silentheart Relentless Hunt"
+        action.allow_parry_to_roll = true
+        action:play()
+
+        return action
+    end
+}]];
+module_map["src/features/auto-parry/data/effects/UmbralKnight"] = [[
+return {
+    allow_block_input = true,
+    id = "DisplayThornsRed",
+    name = "UmbralKnightEffect",
+
+    run = function(action, data)
+        if (data.Character ~= local_player.character) then return end;
+
+        action.ignore_hitbox = true;
+        action.offset = CFrame.new();
+        action.type = "Parry";
+        action.when = data.Time - data.Window;
+        action.user = data.Wep:FindFirstAncestorWhichIsA("Model");
+        action:play(); 
+
+        return    
+end;
+} ]];
+module_map["src/features/auto-parry/data/effects/Vent"] = [[
+return {
+    allow_block_input = true,
+    id = "BlueStun",
+    name = "Vent",
+
+    run = function(action, data)
+        if (data.CH == local_player.character) then return end
+
+        action.hitbox = Vector3.new(15,15,15);
+        action.offset = CFrame.new();
+        action.type = "Parry";
+        action.when = 0;
+        action.user = data.CH;
+        action:play(); 
+
+        return    
+end;
+}  ]];
+module_map["src/features/auto-parry/data/effects/WindCarve"] = [[
+return {
+    id = "WindCarve",
+
+    run = function(action, data)
+        if data.command ~= "startAttack" then return end
+        local range = data.range;
+        local size = data.size;
+        local char = data.char;
+        local dur = data.dur;
+        if char == local_player.character or not char then
+            return        
+end;
+
+        local root = char:FindFirstChild("HumanoidRootPart");
+        if not root then return end;
+        local start = tick();
+        repeat task.wait()
+            local v315 = root.CFrame * CFrame.new(0, 0.5, -(7 + size / 2 + range));
+            if general:in_hitbox(local_player.root_part.CFrame, v315, Vector3.one * (11.5 + size), CFrame.new(), aztup.flags.view_hitboxes) then
+                action.ignore_hitbox = true;
+                action.offset = CFrame.new();
+                action.type = "Parry";
+                action.when = 0;
+                action.user = char;
+                action:play();          
+            end;
+            if not char:FindFirstChild("StopCarve") then
+                task.wait(0.2);
+            else
+                break            
+end;
+        until tick() - start > dur + 0.2;
+        
+        return action    
+end;
+} ]];
+module_map["src/features/auto-parry/data/encrypted_timing_data"] = [[
+return {
+  ['key']= 5,
+  ['keys']= {
+    ['S']= 'allow_parry_to_roll',
+    ['X']= 'allow_parry_to_block',
+    ['F']= 'name',
+    ['E']= 'ignore_early_end',
+    ['z']= 'allow_block_input',
+    ['K']= 'actions',
+    ['l']= 'action_type'
+  },
+  ['action_keys']= {
+    ['j']= 'when',
+    ['s']= 'type',
+    ['f']= 'hitbox',
+    ['U']= 'offset',
+    ['V']= 'ignore_hitbox_check'
+  }
+}]];
+module_map["src/features/auto-parry/data/mantra"] = [[
+
+local Mantra = {}
+
+
+
+
+
+function Mantra.data(entity, name)
+	local player = game:GetService("Players"):GetPlayerFromCharacter(entity)
+	local backpack = player and player:FindFirstChild("Backpack")
+
+	local mantra = backpack and backpack:FindFirstChild(name)
+
+	local rs = mantra and mantra:GetAttribute("RichStats")
+	local bsp = rs and string.match(rs, "%[Blast%]")
+	local msp = rs and string.match(rs, "%[Multiplying%]")
+
+	local dsc = rs and string.match(rs, "(%d+)%s*[xX]%s*Drift Shard")
+	local rsc = rs and string.match(rs, "(%d+)%s*[xX]%s*Rush Shard")
+	local plc = rs and string.match(rs, "(%d+)%s*[xX]%s*Perfect Lens")
+	local clc = rs and string.match(rs, "(%d+)%s*[xX]%s*Crystal Lens")
+	local stc = rs and string.match(rs, "(%d+)%s*[xX]%s*Stratus Stone")
+	local csc = rs and string.match(rs, "(%d+)%s*[xX]%s*Cloudstone")
+	local gsc = rs and string.match(rs, "(%d+)%s*[xX]%s*Glass Stone")
+	local msc = rs and string.match(rs, "(%d+)%s*[xX]%s*Magnifying Stone")
+
+	return {
+		blast = bsp and true or false,
+		drift = dsc and tonumber(dsc) or 0,
+		rush = rsc and tonumber(rsc) or 0,
+		perfect = plc and tonumber(plc) or 0,
+		crystal = clc and tonumber(clc) or 0,
+		stratus = stc and tonumber(stc) or 0,
+		cloud = csc and tonumber(csc) or 0,
+		glass = gsc and tonumber(gsc) or 0,
+		magnifying = msc and tonumber(msc) or 0,
+		spring = rs and rs:find("Spring Spark") or false,
+		multiplying = msp and true or false,
+		mantra = mantra
+	}
+end
+
+
+return Mantra
+]];
+module_map["src/features/auto-parry/data/projectile_timings"] = [[
+local tbl = {}
+tbl['ArdourSlicer'] = (function() 
+return {
+    id = "ArdourSlicer",
+    name = "ArdourSlicer",
+    is = function(part)
+        return part.Name:find("ArdourSlash_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("ArdourSlash_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        while task.wait(0.00) do
+            if not part.Parent then break end
+            if  
+                not general:in_hitbox(Vector3.new(10, 8, 50 + part.Velocity.Magnitude), CFrame.new(0,0,-7.5 + part.Velocity.Magnitude), local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['ArrowM1'] = (function() 
+return {
+    id = "ArrowM1",
+    name = "ArrowM1",
+    is = function(part)
+        return part.Name:find("ArrowModel_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("ArrowModel_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        while task.wait(0.03) do
+            if not part.Parent then break end
+            if  
+                not general:in_hitbox(Vector3.new(10, 8, 30 + part.Velocity.Magnitude), CFrame.new(0,0,-7.5 + part.Velocity.Magnitude), local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['BloodOrb'] = (function() 
+return {
+    id = "BloodOrb",
+    name = "BloodOrb",
+    is = function(part)
+        return part.Name:find("BloodBall_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("BloodBall_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        action.hitbox = Vector3.new(10, 10, 40);
+        action.when = 0;
+        action.user = user;
+        action:play(); 
+        if  
+            general:in_hitbox(Vector3.new(40, 10, 40), CFrame.identity, local_player.root_part.CFrame, part.CFrame, false, false)
+        then
+            return        
+end;
+
+        while task.wait(0.00) do
+            if not part.Parent then break end
+
+            local compensation = (10 * Latency:get_ping());
+            if  
+                not general:in_hitbox(Vector3.new(30 + compensation, 10, 30 + compensation), CFrame.identity, local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['CrimsonRain'] = (function() 
+return {
+    id = "CrimsonRainDagger",
+    name = "CrimsonRainDagger",
+    is = function(part)
+        return part.Name:find("BloodDagger_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("BloodDagger_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        while task.wait(0.00) do
+            if not part.Parent then break end
+            if  
+                not general:in_hitbox(Vector3.new(5, 8, 20 + part.Velocity.Magnitude), CFrame.new(0,0,-7.5 + part.Velocity.Magnitude), local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['FireDagger'] = (function() 
+return {
+    id = "FireDagger",
+    name = "FireDagger",
+    is = function(part)
+        return part.Name:find("FireDagger_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("FireDagger_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        while task.wait(0.00) do
+            if not part.Parent then break end
+            if  
+                not general:in_hitbox(Vector3.new(5, 15, 3 + part.Velocity.Magnitude), CFrame.new(0,0,0 + part.Velocity.Magnitude), local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['FiringLineBlast'] = (function() 
+return {
+	id = "CannonBullet",
+	name = "CannonBullet",
+
+	is = function(part)
+		return part.Name == "CannonBullet"
+	end,
+
+	run = function(action, part)
+		local minDist = math.huge
+
+		repeat
+			task.wait()
+			if part.Parent then
+				local dist = (local_player.root_part.Position - part.Position).Magnitude
+				if dist < minDist then
+					minDist = dist
+				end
+			end
+		until not part.Parent or minDist <= 50
+
+		if not part.Parent then
+			return
+		end
+
+		action.type = "Parry"
+		action.when = 0.1
+		action.name = string.format("CannonBullet-%.2f", minDist)
+		action.hitbox = Vector3.new(10, 10, 10)
+		action.ignore_hitbox = true
+		action.user = part
+		action.allow_parry_to_roll = true
+		action:play()
+
+		return action
+	end,
+}
+
+ end)();
+tbl['RisingShadowPart'] = (function() 
+return {
+	id = "RisingShadowPart",
+	name = "RisingShadowPart",
+
+	is = function(part)
+		return part.Name == "TRACKER"
+	end,
+
+	run = function(action, part)
+		local minDist = math.huge
+
+		repeat
+			task.wait()
+			if part.Parent then
+				local dist = (local_player.root_part.Position - part.Position).Magnitude
+				if dist < minDist then
+					minDist = dist
+				end
+			end
+		until not part.Parent or minDist <= 50
+
+		if not part.Parent then
+			return
+		end
+
+		action.type = "Parry"
+		action.when = 0.5
+		action.name = string.format("RisingShadowPart-%.2f", minDist)
+		action.hitbox = Vector3.new(10, 10, 10)
+		action.ignore_hitbox = true
+		action.user = part
+		action.allow_parry_to_roll = true
+		action:play()
+
+		return action
+	end,
+}
+
+ end)();
+tbl['Scrapsingerbullet'] = (function() 
+return {
+    id = "ScrapsingerBullet",
+    name = "ScrapsingerBullet",
+    is = function(part)
+        return part.Name:find("ScrapsingerBullet_")
+    end,
+    
+    run = function(action, part)
+        local name = part.Name:split("ScrapsingerBullet_")[2]
+        local user do
+            local player = game:GetService("Players")[name]
+            user = player and player.Character
+        end;
+ 
+        if not user or user == local_player.instance then return end
+        
+        while task.wait(0.00) do
+            if not part.Parent then break end
+            if  
+                not general:in_hitbox(Vector3.new(10, 8, 50 + part.Velocity.Magnitude), CFrame.new(0,0,-7.5 + part.Velocity.Magnitude), local_player.root_part.CFrame, part.CFrame, false, false)
+            then
+                continue            
+end;
+
+            action.ignore_hitbox = true;
+            action.when = 0.1;
+            action.user = user;
+            action:play();  
+            return        
+end;             
+    end;
+}   
+ end)();
+tbl['SpearPartSplinter'] = (function() 
+return {
+	id = "SpearPartSplinter",
+	name = "SpearPartSplinter",
+
+	is = function(part)
+		return part.Name == "SpearPartSplinter"
+	end,
+
+	run = function(action, part)
+		local minDist = math.huge
+
+		repeat
+			task.wait()
+			if part.Parent then
+				local dist = (local_player.root_part.Position - part.Position).Magnitude
+				if dist < minDist then
+					minDist = dist
+				end
+			end
+		until not part.Parent or minDist <= 50
+
+		if not part.Parent then
+			return
+		end
+
+		action.type = "Parry"
+		action.when = 0
+		action.name = string.format("Grand Spark Splinter (%.1f)", minDist)
+		action.hitbox = Vector3.new(20, 20, 70)
+		action.ignore_hitbox = true
+		action.user = part
+		action.allow_parry_to_roll = true
+		action:play()
+
+		return action
+	end,
+}
+
+ end)();
+tbl['StrikeIndicator'] = (function() 
+return {
+	id = "StrikeIndicator",
+	name = "Lightning Strike",
+
+	is = function(part)
+		if part.Name ~= "StrikeIndicator" then
+			return false
+		end
+
+		
+		for _, player in game:GetService("Players"):GetPlayers() do
+			if player == game:GetService("Players").LocalPlayer then
+				continue
+			end
+			local character = player.Character
+			if not character then
+				continue
+			end
+			local animator = character:FindFirstChild("Animator", true)
+			if not animator then
+				continue
+			end
+			for _, track in animator:GetPlayingAnimationTracks() do
+				local id = track.Animation.AnimationId:match("%d+")
+				if id == "8857099063" then 
+					return false
+				end
+			end
+		end
+
+		return true
+	end,
+
+	run = function(action, part)
+		action.type = "Parry"
+		action.when = 0.35
+		action.name = "Lightning Strike"
+		action.ignore_hitbox = false
+        action.hitbox = Vector3.new(0, 0, 10)
+		action.user = part
+		action.allow_parry_to_roll = true
+		action:play()
+
+		return action
+	end,
+}
+
+ end)();
+return tbl]];
+module_map["src/features/auto-parry/data/weapon"] = [[
+
+local Weapon = {}
+
+
+
+function Weapon.data(entity)
+	
+	local lh = entity:FindFirstChild("LeftHand")
+	local rh = entity:FindFirstChild("RightHand")
+	local attach = workspace.Thrown and workspace.Thrown:FindFirstChild("Attach_" .. entity.Name)
+	local hw = attach and attach:FindFirstChild("HandWeapon") or (lh and lh:FindFirstChild("HandWeapon")) or (rh and rh:FindFirstChild("HandWeapon"))
+
+	if not hw then
+		return
+	end
+ 
+	local hwstats = hw:FindFirstChild("Stats")
+	if not hwstats then
+		return
+	end
+
+	local ssv = hwstats:FindFirstChild("SwingSpeed")
+	if not ssv then
+		return
+	end
+
+	local lv = hwstats:FindFirstChild("Length")
+	if not lv then
+		return
+	end
+
+	local type = hw:FindFirstChild("Type")
+	if not type then
+		return
+	end
+
+	local nemesis = false
+
+	for _, inst in next, hw:GetChildren() do
+		if not inst:IsA("ParticleEmitter") then
+			continue
+		end
+
+		if inst.Texture ~= "rbxassetid://11889781532" then
+			continue
+		end
+
+		nemesis = true
+		break
+	end
+
+	return {
+		hw = hw,
+		ss = ssv.Value,
+		oss = ssv:GetAttribute("OldValue") or ssv.Value,
+		length = lv.Value,
+		type = type.Value or "N/A",
+		nemesis = nemesis,
+	}
+end
+
+
+return Weapon]];
+module_map["src/features/auto-parry/defend-action-manager"] = [[
+local Signal = require("@src/utility/signal");
+local Keybinds = base_require(game:GetService("ReplicatedStorage"):WaitForChild("KeyBinds"));
+
+local DefendActionManager = {} do
+    DefendActionManager.actions_to_play_through = {};
+    DefendActionManager.currently_handling = {};
+    DefendActionManager.on_update = Signal.new();
+    DefendActionManager.block = {}
+    DefendActionManager.unblock = {}
+
+    local sent_actions = 0;
+    function DefendActionManager.block:FireServer()
+        sent_actions += 1;
+        task.delay(1, function()
+            sent_actions -= 1;
+        end);
+
+        if sent_actions >= 75 then
+            return        
+end
+
+        local remote = KeyHandler:get_cache("Block");
+
+        if remote and not remote:IsDescendantOf(local_player.character) then
+            remote = nil
+        end
+        
+        if not remote then
+            remote = KeyHandler:get_key("Block")
+        end
+        
+        if not remote then return end 
+        remote:FireServer()
+    end
+
+    function DefendActionManager.unblock:FireServer()
+        sent_actions += 1;
+        task.delay(1, function()
+            sent_actions -= 1;
+        end);
+
+        if sent_actions >= 75 then
+            return        
+end
+
+        local remote = KeyHandler:get_cache("Unblock");
+
+        if remote and not remote:IsDescendantOf(local_player.character) then
+            remote = nil
+        end
+        
+        if not remote then
+            remote = KeyHandler:get_key("Unblock")
+        end
+        
+        if not remote then return end 
+        remote:FireServer()
+    end
+
+    function DefendActionManager:add_action(mob, action_type, when, seq_tag_or_other)
+        self._action_seq_counter = (self._action_seq_counter or 0) + 1
+
+        table.insert(self.actions_to_play_through, {
+            mob = mob,
+            type = action_type,
+            when = when,
+            seq = seq_tag_or_other,  
+            other = seq_tag_or_other, 
+            _action_id = self._action_seq_counter,
+        });
+
+        self.on_update:fire();
+    end;
+
+    function DefendActionManager:wrap_add_action(type)
+        return function(_, mob, delay)
+            self:add_action(mob, type, tick() + delay);
+        end    
+end;
+
+    DefendActionManager.queue_block_task = DefendActionManager:wrap_add_action("block");
+    DefendActionManager.queue_unblock_task = function(self, mob, delay, seq)
+        
+        if seq then
+            for i = #self.actions_to_play_through, 1, -1 do
+                local v = self.actions_to_play_through[i]
+                if v.type == "unblock" and (v.seq == seq or v.other == seq) then
+                    
+                    local new_when = tick() + delay;
+                    if new_when > v.when then
+                        v.when = new_when;
+                    end
+                    return                
+end
+            end;
+        end
+
+        self:add_action(mob, "unblock", tick() + delay, seq);
+    end;
+
+    local random = Random.new();
+    function DefendActionManager:queue_generic_parry_task_no_convert(mob)
+        self._current_parry_seq = (self._current_parry_seq or 0) + 1
+        local seq = self._current_parry_seq
+
+        self:add_action(mob, "block", tick(), seq);
+        self:add_action(mob, "unblock", tick() + 0.1, seq);
+    end;
+    
+    function DefendActionManager:queue_generic_parry_task(mob, t)
+        self._current_parry_seq = (self._current_parry_seq or 0) + 1
+        local seq = self._current_parry_seq
+
+        self:add_action(mob, "block", tick(), seq);
+        self:add_action(mob, "unblock", tick() + (t or 0.1), seq);
+    end;
+
+    function DefendActionManager:queue_generic_dodge_task(mob)
+        self:add_action(mob, "dodge", tick());
+    end;
+
+    
+    local fallback_manager = require("@src/features/auto-parry/fallbacks/manager");
+
+    local chance_fail_action_order = { "Parry", "Dodge", "Skip" }
+    local chance_fail_action_lookup = {
+        ["Parry"] = true,
+        ["Dodge"] = true,
+        ["Skip"] = true,
+    }
+
+    function DefendActionManager:normalize_chance_fail_weights(actions_or_weights)
+        local weights = {}
+
+        if typeof(actions_or_weights) == "string" then
+            if chance_fail_action_lookup[actions_or_weights] then
+                weights[actions_or_weights] = 100
+            end
+        elseif typeof(actions_or_weights) == "table" then
+            if #actions_or_weights > 0 then
+                for _, action in ipairs(actions_or_weights) do
+                    if chance_fail_action_lookup[action] then
+                        weights[action] = (weights[action] or 0) + 1
+                    end
+                end
+            else
+                for action, amount in pairs(actions_or_weights) do
+                    if not chance_fail_action_lookup[action] then
+                        continue
+                    end
+
+                    if typeof(amount) == "number" then
+                        weights[action] = math.max(0, amount)
+                    elseif amount then
+                        weights[action] = 1
+                    end
+                end
+            end
+        end
+
+        local total = 0
+        for _, action in ipairs(chance_fail_action_order) do
+            total += weights[action] or 0
+        end
+
+        if total <= 0 then
+            weights = { Skip = 100 }
+        end
+
+        return weights
+    end
+
+    function DefendActionManager:roll_chance_fail_action(weights)
+        local total = 0
+        for _, action in ipairs(chance_fail_action_order) do
+            total += weights[action] or 0
+        end
+
+        if total <= 0 then
+            return "Skip"
+        end
+
+        local rolled = math.random() * total
+        local running = 0
+
+        for _, action in ipairs(chance_fail_action_order) do
+            local amount = weights[action] or 0
+            if amount > 0 then
+                running += amount
+                if rolled <= running then
+                    return action
+                end
+            end
+        end
+
+        return "Skip"
+    end
+
+    function DefendActionManager:execute_failed_parry_variation(mob, actions_or_weights)
+        local weights = self:normalize_chance_fail_weights(actions_or_weights)
+        local chosen = self:roll_chance_fail_action(weights)
+
+        return chosen or "Skip"
+    end
+
+    LPH_NO_VIRTUALIZE(function()
+        function DefendActionManager:defend_action_block(action, dont_pass)
+        
+            if aztup.flags.ap_randomization then
+                if math.random() < aztup.flags.parry_to_fallback_chance / 100 then
+                    if fallback_manager:execute() then
+                        return                    
+end;
+                end
+            end
+        
+            if not dont_pass then
+                if not local_player.tracker:can_parry() then
+                    local should_return = false;
+                
+                    if local_player.tracker:can_dodge() then
+                        should_return = true;
+                        return self:defend_action_dodge(action)                    
+else
+                        if fallback_manager:execute() then
+                            should_return = true;
+                        end;
+                    end
+                
+                    if should_return or not aztup_options.fallbacks.Value.Block then  
+                        local seq = action.seq
+                        if seq then
+                            for j = #self.actions_to_play_through, 1, -1 do
+                                local other = self.actions_to_play_through[j]
+                                if other.type == "unblock" and other.other == seq then
+                                    table.remove(self.actions_to_play_through, j)
+                                end;
+                            end;
+                        end
+                        return                    
+elseif aztup_options.fallbacks.Value.Block then
+                        if aztup.flags.auto_parry_debug then
+                            setthreadidentity(8);
+                            Logger:short_notify("[AP] Forced to block fallback.")
+                        end
+                    end;
+                end;
+            end
+        
+            if getgenv().block_call then 
+                getgenv().block_call(true)
+            end;
+        
+            return self.block:FireServer()
+        end;
+    
+    
+        function DefendActionManager:defend_action_dodge(action)
+            local type = action.mob.Name:sub(1, 1) == "." and "pve_" or "pvp_"
+            if aztup.flags[type .. "blatant_roll"] and not action.full then
+                KeyHandler:get_key("Dodge"):FireServer("roll", nil, nil, false);
+            
+                if aztup.flags[type .. "blatant_roll_with_anims"] then
+                    task.spawn(function() 
+                        
+                        local l_Movement_0 = game:GetService("ReplicatedStorage").Assets.Anims.Movement;
+                        local l_ForwardRoll_0 = l_Movement_0.Roll.ForwardRoll;
+                        local l_BackRoll_0 = l_Movement_0.Roll.BackRoll;
+                        local l_RightRoll_0 = l_Movement_0.Roll.RightRoll;
+                        local l_LeftRoll_0 = l_Movement_0.Roll.LeftRoll;
+                        
+                        local l_LookVector_0 = local_player.root_part.CFrame.LookVector;
+                        local l_MoveDirection_1 = local_player.humanoid.MoveDirection;
+                        if l_MoveDirection_1.Magnitude < 0.1 then
+                            l_MoveDirection_1 = -l_LookVector_0;
+                        end;
+                        local v224;
+                        local v227 = math.deg((math.acos((math.clamp(l_MoveDirection_1:Dot(l_LookVector_0), -1, 1)))));
+                        local v228 = nil;
+                        if v227 <= 45 then
+                            v224 = l_ForwardRoll_0;
+                        elseif v227 > 45 and v227 < 135 then
+                            v228 = math.deg((math.acos((math.clamp(l_MoveDirection_1:Dot((Vector3.new(-l_LookVector_0.z, 0, l_LookVector_0.x))), -1, 1)))));
+                            v224 = if v228 <= 45 then l_RightRoll_0 else if v228 > 135 then l_LeftRoll_0 else l_BackRoll_0;
+                        else
+                            v224 = l_BackRoll_0;
+                        end;
+                        local l_ForwardWaterDash_0 = l_Movement_0.WaterDash.ForwardWaterDash;
+                        local l_BackWaterDash_0 = l_Movement_0.WaterDash.BackWaterDash;
+                        local l_RightWaterDash_0 = l_Movement_0.WaterDash.RightWaterDash;
+                        local l_LeftWaterDash_0 = l_Movement_0.WaterDash.LeftWaterDash;
+                        local v86 = {
+                            [l_ForwardRoll_0] = l_ForwardWaterDash_0, 
+                            [l_BackRoll_0] = l_BackWaterDash_0, 
+                            [l_RightRoll_0] = l_RightWaterDash_0, 
+                            [l_LeftRoll_0] = l_LeftWaterDash_0
+                        };
+                        
+                        local anim = EffectReplicator:FindEffect("ClientSwim") and v86[v224] or v224;
+                        
+                        local first_roll_track = local_player.humanoid:LoadAnimation(anim);
+                        first_roll_track:Play(0.1, 1, 1);
+                        task.wait()
+                        first_roll_track:Stop(0.1);
+                        
+                        local v68 = local_player.humanoid:LoadAnimation(l_Movement_0.Roll.CancelRight);
+                        v68:Play();
+                    end)
+                end
+            
+                return task.delay(.15, function()
+                    KeyHandler:get_key("StopDodge"):FireServer({
+                        W = false,
+                        Right = true,
+                        S = false,
+                        NOAERIALS = false
+                    }, EffectReplicator:HasEffect("LightAttack"))
+                end)            
+end;
+        
+            local roll_cancel = aztup.flags[type .. "roll_cancel"];
+        
+            if getgenv().requesting_dodge then 
+                getgenv().requesting_dodge()
+            end;
+        
+            Keybinds.ForceActionDown("Dodge")
+            Keybinds.ForceActionUp("Dodge")
+        
+            if roll_cancel and aztup.flags[type .. "roll_cancel_chance"] > (math.random() * 100) and not action.full then
+                task.wait(math.random(aztup.flags[type .. "min_roll_cancel_delay"], aztup.flags[type .. "max_roll_cancel_delay"] >= aztup.flags[type .. "min_roll_cancel_delay"] and aztup.flags[type .. "max_roll_cancel_delay"] or aztup.flags[type .. "min_roll_cancel_delay"]) / 1000)
+                
+                local client_feint = EffectReplicator:CreateEffect("ClientFeint");
+                
+                if client_feint then
+                    client_feint:Debris(0.1);
+                end;
+            end
+        
+            return        
+end;
+    
+    
+        function DefendActionManager:defend_action_unblock()
+            self.unblock:FireServer()
+            
+            if getgenv().block_call then 
+                task.delay(math.random(1, 5) / 100, function()
+                    getgenv().block_call(false)
+                end)
+            end;
+
+            task.spawn(function() 
+                local start = tick();
+                while (tick() - start <= 0.05 or EffectReplicator:FindEffect("Blocking")) and task.wait() do
+                    self.unblock:FireServer();
+                end
+            end)
+        end;
+    end)();
+
+    function DefendActionManager:update() 
+        LPH_NO_VIRTUALIZE(function()
+            self._block_count = self._block_count or 0
+            self._dodge_until = self._dodge_until or 0
+            self._block_started_at = self._block_started_at or 0
+
+            if #self.actions_to_play_through > 5 then
+                table.clear(self.actions_to_play_through);
+            end
+
+            if self._block_count > 0 then
+                local has_pending_unblock = false
+                for i = #self.actions_to_play_through, 1, -1 do
+                    if self.actions_to_play_through[i].type == "unblock" then
+                        has_pending_unblock = true
+                        break
+                    end
+                end
+
+                
+                if self._block_started_at == 0 then
+                    self._block_started_at = tick()
+                end
+
+                
+                if (not has_pending_unblock) and (tick() - self._block_started_at > 0.25) then
+                    self._block_count = 0
+                    self._block_started_at = 0
+                    self:defend_action_unblock()
+                end
+            else
+                self._block_started_at = 0
+
+                
+                
+                
+                
+                
+                if EffectReplicator:FindEffect("Blocking") and not self._stray_block_unblocking and not general:raw_is_holding_f() then
+                    self._stray_block_unblocking = true
+
+                    if getgenv().block_call then
+                        getgenv().block_call(false)
+                    end;
+
+                    task.spawn(function()
+                        while EffectReplicator:FindEffect("Blocking") and not general:raw_is_holding_f() and task.wait() do
+                            self.unblock:FireServer();
+                        end
+                        self._stray_block_unblocking = false
+                    end)
+                end
+            end
+
+            
+            
+            local to_process = {};
+            local to_remove = {};
+
+            for i = #self.actions_to_play_through, 1, -1 do 
+                local v = self.actions_to_play_through[i]
+
+                if tick() >= v.when and not self.currently_handling[v] then
+                    local mob = v.mob
+                    local allowed_targets = aztup_options.allowed_targets.Value;
+
+                    local filtered = false;
+                    if not mob then
+                        if not allowed_targets.Unknown and not allowed_targets.All then
+                            filtered = true;
+                        end;
+                    else
+                        if not allowed_targets.PVP and services.Players:GetPlayerFromCharacter(mob) and not allowed_targets.All then
+                            filtered = true;
+                        end;
+                    
+                        if not allowed_targets.PVE and mob.Name:sub(1,1) == "." and not allowed_targets.All then
+                            filtered = true;
+                        end;
+                    end;
+
+                    if filtered then
+                        
+                        if v.type == "block" and v.seq then
+                            for j = #self.actions_to_play_through, 1, -1 do
+                                local other = self.actions_to_play_through[j]
+                                if other.type == "unblock" and (other.seq == v.seq or other.other == v.seq) then
+                                    table.remove(self.actions_to_play_through, j)
+                                    if j < i then i = i - 1 end
+                                end
+                            end
+                        end
+                        table.remove(self.actions_to_play_through, i)
+                        continue
+                    end
+                
+                    local typ = v.type
+
+                    if typ == "dodge" and (self._block_count or 0) > 0 then
+                        table.remove(self.actions_to_play_through, i)
+                        continue
+                    end
+
+                    if typ == "block" and tick() < self._dodge_until then
+                        local delta = self._dodge_until - tick()
+                        v.when = self._dodge_until
+
+                        
+                        if v.seq then
+                            for j = #self.actions_to_play_through, 1, -1 do
+                                local other = self.actions_to_play_through[j]
+                                if other.type == "unblock" and (other.seq == v.seq or other.other == v.seq) then
+                                    other.when = other.when + delta;
+                                end
+                            end;
+                        end
+                        continue
+                    end
+
+                    self.currently_handling[v] = true
+                    table.remove(self.actions_to_play_through, i)
+
+                    task.spawn(function()
+                        if typ == "block" then
+                            self._block_count = math.max(0, (self._block_count or 0) + 1)
+                            if self._block_count == 1 then
+                                self._block_started_at = tick()
+                                self:defend_action_block(v, v.other)
+                            end
+                        elseif typ == "unblock" then    
+                            if (self._block_count or 0) > 0 then
+                                self._block_count = math.max(0, (self._block_count or 0) - 1)
+                                if self._block_count == 0 then
+                                    self._block_started_at = 0
+                                    self:defend_action_unblock(v)
+                                end
+                            end
+                        elseif typ == "dodge" then
+                            self._dodge_until = tick() + 0.1;
+                            self:defend_action_dodge(v)
+                        end
+
+                        self.currently_handling[v] = nil
+                    end)
+
+                    if typ == "block" or typ == "dodge" then
+                        break                    
+end;
+                end
+            end
+        end)();
+    end;
+
+    local last = tick();
+    LPH_NO_VIRTUALIZE(function()
+        
+        
+        
+        
+
+        
+        
+        
+
+        aztup.maid:give_task(services.RunService.Heartbeat:Connect(function()
+            if tick() - last < 1 / 30 then
+                return            
+end
+
+            if sent_actions >= 75 then
+                return            
+end
+            
+            DefendActionManager:update();
+        end));
+    end)();
+end;
+
+return DefendActionManager]];
+module_map["src/features/auto-parry/fallbacks/fallback"] = [[
+
+
+
+
+local Fallback = {}
+Fallback.__index = Fallback
+Fallback.__type = "Fallback"
+
+
+
+
+
+
+
+function Fallback.new(options)
+    local self = setmetatable({}, Fallback)
+
+    self.getPriority = options.getPriority
+    self.execute = options.execute
+    self.shouldExecute = options.shouldExecute
+
+    return self
+end
+
+return Fallback]];
+module_map["src/features/auto-parry/fallbacks/manager"] = [[
+local fallbacks = {};
+local manager = {};
+
+function manager.register_fallback(fallback)
+    table.insert(fallbacks, fallback);
+end
+
+function manager.new()
+    return setmetatable({}, {__index = manager})
+end
+
+function manager:execute()
+    for _, fallback in fallbacks do
+        if fallback.shouldExecute() then
+            fallback.execute();
+            return true        
+end
+    end
+
+    return false
+end
+
+for _, object in list_modules("features/auto-parry/fallbacks/objects/*") do
+    local success, fallback = pcall(require, object);
+    if success and fallback then
+        table.insert(fallbacks, fallback);
+    else
+        print("failed to get fallback from " .. object);
+    end
+end
+
+return manager.new()]];
+module_map["src/features/auto-parry/fallbacks/objects/prediction"] = [[
+
+local Fallback = require("@src/features/auto-parry/fallbacks/fallback");
+
+return Fallback.new({
+    getPriority = function(self)
+        return 4 
+    end,
+    
+    shouldExecute = function(self)
+        local backpack = local_player.instance:FindFirstChild("Backpack");
+        if not backpack then return end;
+
+        local equalizer = backpack:FindFirstChild("Mantra:PredictionIntelligence{{Prediction}}");
+        if not equalizer then return end;    
+
+        local ether = local_player.character:FindFirstChild("Ether");
+        if not ether or ether.Value < equalizer.Cost.Value + 50 then return end;
+
+        for _, effect in EffectReplicator:GetEffects() do
+            if effect.Class == "ToolLockCD" then
+                if effect.Value == "Mantra:PredictionIntelligence{{Prediction}}" then
+                    return                
+end
+            end
+        end
+
+        return aztup_options.fallbacks.Value["Prediction"]    
+end,
+
+    execute = function(self)
+        local backpack = local_player.instance:FindFirstChild("Backpack");
+        if not backpack then return end;
+
+        local equalizer = backpack:FindFirstChild("Mantra:PredictionIntelligence{{Prediction}}");
+        if not equalizer then return end;   
+			
+		local character_handler = local_player.character:FindFirstChild("CharacterHandler");
+		local requests = character_handler and character_handler:FindFirstChild("Requests");
+		local activate_mantra = requests and requests:FindFirstChild("ActivateMantra");
+
+        if not activate_mantra then return end;
+
+		activate_mantra:FireServer(equalizer)			
+    end
+})
+]];
+module_map["src/features/auto-parry/fallbacks/objects/unbidden"] = [[
+
+local Fallback = require("@src/features/auto-parry/fallbacks/fallback");
+
+return Fallback.new({
+    getPriority = function(self)
+        return 5 
+    end,
+    
+    shouldExecute = function(self)
+        local passives = local_player.character:GetAttribute("ssv_Passives");
+        return not EffectReplicator:FindEffect("CriticalCool") and not EffectReplicator:FindEffect("UsingCritical") and passives and passives:find("Curse of the Unbidden") and aztup_options.fallbacks.Value["Curse of the Unbidden"]
+    end,
+
+    execute = function(self)
+        KeyHandler:get_key("CriticalClick"):FireServer({
+            S = false,
+            NOAERIALS = false, 
+            Space = false,
+            Right = false,
+            W = false,
+            Left = true
+        }, false);
+    end
+})
+]];
+module_map["src/features/auto-parry/fallbacks/objects/vent"] = [[
+
+local Fallback = require("@src/features/auto-parry/fallbacks/fallback");
+
+return Fallback.new({
+    getPriority = function(self)
+        return 1 
+    end,
+    
+    shouldExecute = function(self)
+        local character = local_player.character
+        if not character then
+            return false
+        end
+    
+        local tempo = character:FindFirstChild("Tempo")
+        if not tempo then
+            return false
+        end
+    
+        if tempo.Value < 40 then
+            return false
+        end
+    
+        if not EffectReplicator:HasEffect("Equipped") then
+            return false
+        end
+    
+        if EffectReplicator:HasEffect("NoBurst") then
+            return false
+        end    
+
+        return aztup_options.fallbacks.Value["Vent"]
+    end,
+
+    execute = function(self)
+        local character_handler = local_player.character:FindFirstChild("CharacterHandler");
+        local requests = character_handler and character_handler:FindFirstChild("Requests");
+        local vent = requests and requests:FindFirstChild("Vent");
+
+        if vent then
+            vent:FireServer();
+        end
+    end
+})
+]];
+module_map["src/features/auto-parry/handlers/animator-handler"] = [[
+local profiler = require("@src/utility/profiler")
+local anti_ap_breaker = require("@src/features/auto-parry/handlers/anti-ap-breaker")
+
+local random = Random.new();
+local cached = {};
+function getInfo(id)
+    local success, info = pcall(function()
+        if not cached[id] then
+            cached[id] = game:GetService("MarketplaceService"):GetProductInfo(id);
+        end
+        return cached[id]
+    end)
+    if success then
+        return info
+    end
+    return {Name=''}
+end
+
+local encrypted_timing_data = require("@src/features/auto-parry/data/encrypted_timing_data");
+local custom_timings = require("@src/features/auto-parry/data/custom_timings");
+local ap_breaker_tracks = setmetatable({}, { __mode = "k" });
+
+break_anims = function(track, time, data, action_type, self)
+    if not data then return end
+    if track:HasTag("PR_BREAKER_IGNORE") then return end
+
+    if aztup.flags.ap_breaker and aztup_options.ap_breaker_type.Value == "Tester Aggressive 1 (Blatant)" and not track.Looped and track.Speed > 0.1 then
+        while track.IsPlaying do
+            
+            
+            
+            
+            
+            
+
+            track:AdjustWeight(0, 50);
+            
+            task.wait();
+        end;
+    end;
+
+    if aztup.flags.ap_breaker and aztup_options.ap_breaker_type.Value == "Aggressive 3 (Blatant)" and not track.Looped and track.Speed > 0.1 then
+        ap_breaker_tracks[track] = true;
+        track.Priority = Enum.AnimationPriority.Movement;
+        
+        
+        track:Stop(9e9);
+        task.wait((track.Length / track.Speed) - Latency:half_ping());
+        track.TimePosition = track.Length;
+        track:Play(0.1,0,0)
+        track:AdjustWeight(0, 0.1);
+        ap_breaker_tracks[track] = nil;
+    end;
+end;
+
+process = function(timing_data)
+    for index, item in encrypted_timing_data.keys do
+        if timing_data[item] or not timing_data[index] then continue end
+        timing_data[item] = timing_data[index];
+        timing_data[index] = nil;
+    end
+
+    timing_data.actions = table.clone(timing_data.actions);
+    for timing_number, action in timing_data.actions do
+        if not action then continue end
+        
+        action = table.clone(action);
+        for index, item in encrypted_timing_data.action_keys do
+            if action[item] or not action[index] then continue end
+            action[item] = action[index];
+            action[index] = nil;
+        end
+
+        if action.when then
+            action.when = action.when - encrypted_timing_data.key;
+        end
+
+        timing_data.actions[timing_number] = action;
+    end
+
+    timing_data.enc = false;
+    return timing_data 
+end
+
+local track_still_active
+
+track_still_active = LPH_JIT_MAX(function(track: AnimationTrack, entity)
+    if ap_breaker_tracks[track] then
+        return true    
+end;
+
+    return track.IsPlaying or anti_ap_breaker:is_fully_dead(track, entity) == false
+end)
+
+return LPH_NO_VIRTUALIZE(function()
+    local last_mid_attack_delay = 0;
+    local AnimatorHandler = {};
+    AnimatorHandler.__index = AnimatorHandler;
+    local Keybinds = base_require(game:GetService("ReplicatedStorage"):WaitForChild("KeyBinds"..""));
+    local data = require("@src/features/auto-parry/data/base");
+    local timing_data = {};
+    for index, timing in data do
+        if typeof(timing) ~= "table" then continue end
+        timing_data[timing.name or index] = timing;
+    end; 
+
+    local function debug_print(...)
+        if not (aztup and aztup.flags and aztup.flags.auto_parry_debug) then return end
+        setthreadidentity(8)
+        Logger:short_notify(string.format(...))
+    end
+
+    local in_parry_frames = false;
+    local in_dodge_frames = false;
+    local self_anim_data = {};  
+
+    local allAnimations = {};
+    local mobsAnims = {};
+    do
+        local animsFolder = services.ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Anims");
+        local mobsAnimsFolder = animsFolder:WaitForChild("Mobs");
+
+        local match, format = string.match, string.format;
+
+        
+        local mobAnimObjects = mobsAnimsFolder:QueryDescendants("Animation");
+        local allAnimObjects = animsFolder:QueryDescendants("Animation");
+
+        
+        
+        local isMobAnim = {};
+        for _, v in mobAnimObjects do
+            isMobAnim[v] = true;
+        end;
+
+        local mobIds, nonMobIds = {}, {};
+
+        for _, v in allAnimObjects do
+            local animationId = match(v.AnimationId, '%d+');
+            if not animationId then continue end;
+
+            allAnimations[animationId] = format('%s-%s', v.Parent.Name, v.Name);
+
+            if isMobAnim[v] then
+                mobIds[animationId] = true;
+            else
+                nonMobIds[animationId] = true;
+            end;
+        end;
+
+        
+        local n = 0;
+        for animationId in mobIds do
+            if nonMobIds[animationId] then continue end;
+            n += 1;
+            mobsAnims[animationId] = true;
+        end;
+
+        mobsAnims["11508725111"] = true;
+        mobsAnims["11710290503"] = true;
+        mobsAnims["6428519131"] = true;
+	    mobsAnims["129800120542781"] = true;
+	    mobsAnims["6501497627"] = true;
+	    mobsAnims["82335285372711"] = true;
+	    mobsAnims["106886961189983"] = true;
+    end;
+
+    local last_payback_delay_time = 0;
+
+    local fast_timing_lookup_table = {};
+
+    local function create_fast_timing_lookup_table()
+        table.clear(fast_timing_lookup_table);
+        
+        
+        for pass = 1, 2 do
+            for index, timing in timing_data do
+                if not timing.ids or (timing.run ~= nil) ~= (pass == 1) then continue end;
+                for _, id in next, timing.ids do
+                    fast_timing_lookup_table[id] = index; 
+                end;
+            end;
+        end;
+
+        ap_breaker_tbl = fast_timing_lookup_table;
+    end
+    ap_breaker_tbl = fast_timing_lookup_table;
+
+    if not LPH_OBFUSCATED then
+        getgenv().mob_anims = mobsAnims;
+    end;
+
+    if can_edit_internal_timings then
+        getgenv().fast_timing_lookup_table = fast_timing_lookup_table;
+        getgenv().timings = timing_data;
+        
+        getgenv().remove_timing = function(name)
+            timing_data[name] = nil;
+            create_fast_timing_lookup_table();
+        end;
+    end;
+
+    
+    getgenv().timing_names = function()
+        local list = {};
+        for index, timing in timing_data do
+            local str = typeof(index) == "string" and index or timing.name or timing.actions and timing.actions[1] and timing.actions[1].name;
+            if str then table.insert(list, str); end;
+        end;
+        for name in custom_timings:sync() do
+            table.insert(list, name);
+        end;
+        return list    
+end;
+    
+    getgenv().load_timings = function(b)
+        (aztup and aztup.silent_mode and function() end or debug.profilebegin)("reload timings");
+        local a = 0;
+        for _, file in ipairs(listfiles("rw_timings")) do
+            if not isfile(file) then continue end 
+            local src = readfile(file);
+            local old_file = file; 
+            file = file:gsub("rw_timings", ""):gsub("/",""):gsub("\\", ""):gsub(".lua", ""):gsub(".json", "");
+            if timing_data[file] and timing_data[file].src == src then continue end
+    
+            if old_file:match(".lua") then
+                local func, reason = loadstring(src, file);
+                if not func then 
+                    warn("Failed to load timing file: "..file, reason);
+                    continue                
+end
+            
+                local success, result = pcall(func);
+                if not success then
+                    warn("Failed to run timing file XPCALL: "..file, result);
+                    continue                
+end
+            
+                timing_data[file] = result
+            elseif old_file:match(".json") then
+                timing_data[file] = services.HttpService:JSONDecode(src);
+            end;
+    
+            timing_data[file].src = src;
+            a += 1;
+        end
+        (aztup and aztup.silent_mode and function() end or debug.profileend)();
+        create_fast_timing_lookup_table();
+    end
+    
+    pcall(function()
+        if not isfolder("rw_timings") then
+            makefolder("rw_timings");
+        end;
+
+        if not can_edit_internal_timings and not getgenv().allowed_to_load_timings then return create_fast_timing_lookup_table()end
+        
+        return getgenv().load_timings(true)    
+end);
+    
+    if not LPH_OBFUSCATED and not is_chime then
+        local last_update = tick();
+        aztup.maid:give_task(services.RunService.RenderStepped:Connect(function()   
+            if tick() - last_update <= 0.5 then return end
+            if not getgenv().dev_tools_data or not getgenv().dev_tools_data["hot-reload-timings"] then return end
+            if not services.UserInputService:IsKeyDown(Enum.KeyCode.Backquote) then return end
+
+            Logger:notify_sound("Reloaded timings.");
+            last_update = tick();
+            xpcall(getgenv().load_timings, warn);
+            last_update = tick();
+        end));   
+    end;
+
+    function debug_print(...)
+        if not aztup.flags.auto_parry_debug then return end
+        
+        setthreadidentity(8);
+        Logger:short_notify(string.format(...));
+    end;
+    
+    local added = {};
+    function AnimatorHandler.new(entity: Model)
+        local self = setmetatable({}, AnimatorHandler);
+        if added[entity] then
+            
+            added[entity].ancestry:Disconnect();
+            added[entity].ancestry = nil;
+            
+            added[entity].played:Disconnect();
+            added[entity].played = nil;
+            
+            added[entity].descendant_added:Disconnect();
+            added[entity].descendant_added = nil;
+
+            if added[entity].feint_playing then
+                added[entity].feint_playing:Disconnect();
+                added[entity].feint_playing = nil; 
+            end;
+ 
+            added[entity] = nil;
+        end
+        self.animator = entity:FindFirstChild("Animator", true);
+        self.entity = entity;
+        self.humanoid = self.entity:FindFirstChild("Humanoid");
+        self.evaluation_data = {};
+        self.flag = self.entity.Name:sub(1,1) == "." and "pve_" or "pvp_"
+        self.is_player = services.Players:GetPlayerFromCharacter(entity) ~= nil;
+        self.player = services.Players:GetPlayerFromCharacter(entity);
+        self.running_tracks = setmetatable({}, { __mode = "k" }); 
+        self.last_feint_at = 0;
+        added[entity] = self;
+        self.ancestry = entity.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                added[entity] = nil;
+                self.ancestry:Disconnect();
+                self.ancestry = nil;
+                
+                self.played:Disconnect();
+                self.played = nil;
+                
+                self.descendant_added:Disconnect(); 
+                self.descendant_added = nil;
+
+                if self.feint_playing then
+                    self.feint_playing:Disconnect();
+                    self.feint_playing = nil;
+                end;
+            end;
+        end);
+
+        self.hits = {};
+        self.descendant_added = self.entity.DescendantAdded:Connect(function(child)
+            if child.Name == "PunchBlood" or child.Name == "PunchEffect" or child.Name == "BloodSpray" or (child:IsA("ParticleEmitter") and child.Texture == "rbxassetid://7216855595") then	
+                local id = table.insert(self.hits, {})
+                task.delay(0.2, function()
+                    table.remove(self.hits, id)
+                end)
+                return            
+end
+
+            if child.Name == "REP_SOUND_1241766316" then
+                self:cancel_gale_feinted_tracks(self.entity.Humanoid:GetPlayingAnimationTracks());
+            end
+
+            if child.Name == "Feint" and child:IsA("Sound") then
+                if self.feint_playing then
+                    self.feint_playing:Disconnect();
+                    self.feint_playing = nil;
+                end;
+
+                self.feint_playing = child:GetPropertyChangedSignal("Playing"):Connect(function()
+                    if child.IsPlaying then
+                        self:cancel_feinted_tracks(self.animator:GetPlayingAnimationTracks());
+                    end;
+                end);
+                aztup.maid[services.HttpService:GenerateGUID(false)] = self.feint_playing;
+                return            
+end;
+
+            local fake_strike = child.Name == "REP_SOUND_5115545256" and tostring(child.PlaybackSpeed) == "2";
+            if child.Name ~= "REP_SOUND_4954198253" and not fake_strike then return end;
+
+            self:cancel_feinted_tracks(self.animator:GetPlayingAnimationTracks());
+        end);
+
+        self.played = self.animator.AnimationPlayed:Connect(profiler.wrap("animator_handler::run", function(track)
+            self:run(track);
+        end));
+    
+        aztup.maid[services.HttpService:GenerateGUID(false)] = self.played;
+        aztup.maid[services.HttpService:GenerateGUID(false)] = self.descendant_added;
+        aztup.maid[services.HttpService:GenerateGUID(false)] = self.ancestry;
+
+        return self    
+end
+
+    
+    
+    
+    
+    
+    
+    function AnimatorHandler:track_cleanup(track, fn)
+        local state = self.running_tracks[track];
+        if not state then return end
+        table.insert(state.cleanups, fn);
+    end
+
+    function AnimatorHandler:track_feint_thread(track, thread)
+        local state = self.running_tracks[track];
+        if not state then return end
+        table.insert(state.feint_threads, thread);
+    end
+
+    function AnimatorHandler:untrack_feint_thread(track, thread)
+        local state = self.running_tracks[track];
+        if not state then return end
+        local index = table.find(state.feint_threads, thread);
+        if index then
+            table.remove(state.feint_threads, index);
+        end
+    end
+
+    
+    
+    function AnimatorHandler:cancel_running_track(track)
+        local state = self.running_tracks[track];
+        if not state then return end
+        self.running_tracks[track] = nil;
+
+        for _, cleanup in state.cleanups do
+            pcall(cleanup);
+        end
+
+        if state.thread and coroutine.status(state.thread) ~= "dead" then
+            task.cancel(state.thread);
+        end
+
+        for _, thread in state.feint_threads do
+            if coroutine.status(thread) ~= "dead" then
+                task.cancel(thread);
+            end
+        end
+    end
+
+    
+    
+    
+    
+    function AnimatorHandler:cancel_feinted_tracks(playing_tracks)
+        self.last_feint_at = tick();
+
+        for _, track in playing_tracks do
+            local state = self.running_tracks[track];
+            if not state then continue end
+
+            local action = state.action;
+            if action and action.ignore_feints then continue end
+
+            if state.action_type == "M1" and aztup.flags.ap_randomization and math.random() * 100 <= aztup.flags.bluff_feint_chance then
+                debug_print("[Auto Feint] Bluffing through a detected feint.");
+                continue            
+end
+
+            self:cancel_running_track(track);
+        end
+    end
+
+    
+    
+    function AnimatorHandler:cancel_gale_feinted_tracks(playing_tracks)
+        for _, track in playing_tracks do
+            local state = self.running_tracks[track];
+            if not state or not state.action or not state.action.detect_gale_feint then continue end
+
+            self:cancel_running_track(track);
+        end
+    end
+
+    function AnimatorHandler:in_hitbox_with_pos(root_pos: CFrame, enemy_pos: CFrame, hitbox: Vector3, offset: CFrame, hidden: boolean?)
+        return general:in_hitbox_with_pos(root_pos, enemy_pos, hitbox, offset, hidden, self.ball)
+    end
+
+
+    local position_prediction_service = require("@src/features/auto-parry/services/position_prediction_service");
+    function AnimatorHandler:in_hitbox(hitbox: Vector3, offset: CFrame, hidden: boolean?, predict, predict_time, predict_rotation, base_predict)  
+        local predicted_pos_us = position_prediction_service.our_predicted_position(); 
+        local predicted_other_pos, dbg = position_prediction_service.predict(self.player, (Latency:get_ping() + (predict_time and typeof(predict_time) == "number" and predict_time or 0)) + 0.5, {
+            predict_rotation = predict_rotation
+        })
+
+        local other_pos = predicted_other_pos or self.entity:FindFirstChild("HumanoidRootPart") and self.entity.HumanoidRootPart.CFrame or CFrame.new();
+
+        if not predict then
+            return general:in_hitbox_with_pos(local_player.root_part.CFrame, self.entity.HumanoidRootPart.CFrame, hitbox, offset, hidden, self.ball)
+        end;
+
+        local predicted = general:in_hitbox_with_pos(predicted_pos_us, other_pos, hitbox, offset, hidden, self.ball, Color3.fromRGB(205, 119, 255), Color3.fromRGB(255, 165, 130));
+        local base = base_predict and general:in_hitbox_with_pos(local_player.root_part.CFrame, self.entity.HumanoidRootPart.CFrame, hitbox, offset, hidden, self.ball);
+
+        return base or predicted 
+        
+    end;
+    local tasks = 0;
+
+    local action_builder = require("@src/features/auto-parry/data/action")
+
+    
+    
+    
+    
+    
+
+    
+    
+    
+    
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local function create_block_input_task(self, track, action, data, action_type, name, time, alotted, ignore_anim_early_end, blocked_bi, start, in_hitbox)
+        if not (data.allow_block_input and not aztup_options.blocked_safe_input_moves.Value["Animations"] and not blocked_bi) then
+            return { remove = function() end }        
+end
+
+        return BlockInputManager:add_task(
+            name,
+            self.entity,
+            function()
+                if not action.ignore_early_end and not track_still_active(track, self.entity) and not ignore_anim_early_end then return end
+                if EffectReplicator:FindEffect("Knocked") then return end;
+
+                if not action.ignore_hitbox and not in_hitbox(true) then
+                    return                
+end;
+
+                if
+                    not data.dont_skip_mob_block_break
+                    and self.entity:FindFirstChild("MegalodauntBroken", true)
+                    and not services.Players:GetPlayerFromCharacter(self.entity)
+                    and aztup_options.filters.Value["Dont Parry If Mob Block Broken"]
+                then
+                    return                
+end
+
+                if aztup_options.filters.Value["Dont Parry If Not Mob Target"] and self.entity.Name:sub(1, 1) == "." and self.entity:FindFirstChild("Target") then
+                    if self.entity:FindFirstChild("Target").Value ~= local_player.character and not action.ignore_other_target then
+                        return                    
+end;
+                end;
+
+                if EffectReplicator:FindEffect("Knocked") and aztup_options.filters.Value["Dont Parry If Knocked"] then
+                    return                
+end;
+
+                local type = aztup_options.bi_punishable_type.Value;
+
+                if type == "Custom" then
+                    return tick() - start >= (time - alotted) - (aztup.flags.bi_punishable_time / 1000)                
+elseif type == "Dynamic" then
+                    
+                    return tick() - start >= (time - alotted) - (last_mid_attack_delay + (aztup.flags.extra_bi_punishable_time / 1000))                
+end
+
+                return true            
+end
+        )    
+end
+
+    
+    
+    
+    
+    local function check_action_preconditions_auto_feint(self, track, action, data, action_type, name, index, in_hitbox)
+        if not action.ignore_hitbox and not in_hitbox(true) then
+            return true        
+end;
+
+        if action.cancelled then
+            return true        
+end
+
+        if
+            not data.dont_skip_mob_block_break
+            and self.entity:FindFirstChild("MegalodauntBroken", true)
+            and not services.Players:GetPlayerFromCharacter(self.entity)
+            and aztup_options.filters.Value["Dont Parry If Mob Block Broken"]
+        then
+            return true        
+end
+
+        if aztup_options.filters.Value["Dont Parry If Not Mob Target"] and self.entity.Name:sub(1, 1) == "." and self.entity:FindFirstChild("Target") then
+            if self.entity:FindFirstChild("Target").Value ~= local_player.character and not action.ignore_other_target then
+                return true            
+end;
+        end;
+
+        if EffectReplicator:FindEffect("Knocked") and aztup_options.filters.Value["Dont Parry If Knocked"] then
+            return true        
+end;
+
+        return false    
+end
+
+    
+    
+    
+    
+    local function check_action_preconditions(self, track, action, data, action_type, name, index, in_hitbox)
+        if not action.ignore_hitbox and not in_hitbox(false) then
+            return true        
+end;
+
+        if action.cancelled then
+            debug_print("[%s] skipping action %s due to module-based cancellation", name, action_type);
+            return true        
+end
+
+        if
+            not data.dont_skip_mob_block_break
+            and self.entity:FindFirstChild("MegalodauntBroken", true)
+            and not services.Players:GetPlayerFromCharacter(self.entity)
+            and aztup_options.filters.Value["Dont Parry If Mob Block Broken"]
+        then
+            debug_print("[%s] Entity is block broken, skipping action %s", name, action_type);
+            return true        
+end
+
+        if aztup_options.filters.Value["Dont Parry If Not Mob Target"] and self.entity.Name:sub(1, 1) == "." and self.entity:FindFirstChild("Target") then
+            if self.entity:FindFirstChild("Target").Value ~= local_player.character and not action.ignore_other_target then
+                debug_print("[%s] Mob is targeting someone else, skipping action %s", name, action_type);
+                return true            
+end;
+        end;
+
+        if EffectReplicator:FindEffect("Knocked") and aztup_options.filters.Value["Dont Parry If Knocked"] then
+            debug_print("[%s] Knocked, Skipping action %s", name, action_type);
+            return true        
+end;
+
+        return false    
+end
+
+    
+    
+    
+    
+    
+    local function check_action_situation_filters(self, track, action, action_type, name, index)
+        if aztup_options.filters.Value["Dont Parry If Holding Block"] and Keybinds.IsActionHeld("Block") then
+            setthreadidentity(8);
+            debug_print("[%s] Skipping action, Holding F.", name);
+            return "continue"        
+end;
+
+        if aztup_options.filters.Value["Dont Parry If In Payback"] and (EffectReplicator:FindEffect("PaybackHealTally") and tick() - last_payback_delay_time > 60 or EffectReplicator:FindEffect("DelayedPayback")) then
+            debug_print("[%s] Skipping action, In Payback.", name);
+            return "continue"        
+end;
+
+        if aztup_options.filters.Value["Dont Parry If Off Roblox"] and not aztup.automation:has_any() then
+            if not isrbxactive() then
+                debug_print("[%s] Skipping action %i, User is not tabbed in.", name, index);
+                return "continue"            
+end
+        end
+
+        if self.entity:GetAttribute("Owner") and self.entity:GetAttribute("Owner") == local_player.instance.Name then
+            debug_print("[%s] Skipping timing due to us owning the entity.", name)
+            return "break"        
+end;
+
+        if aztup_options.filters.Value["Dont Parry If Off Screen"] and not aztup.automation:has_any() then
+            local _, vis = workspace.CurrentCamera:WorldToViewportPoint(self.entity.HumanoidRootPart.Position);
+            if not vis then
+                debug_print("[%s] Skipping action %i, Entity is off screen.", name, index);
+                return "continue"            
+end
+        end
+
+        if #self.hits > 0 and (
+            action_type == "M1" or
+            action_type == "Critical" and aztup_options.filters.Value["Dont Parry If Enemy Hit In Criticals"]
+        ) then
+            debug_print("[%s] Skipping action %i, Enemy hit in %s.", name, index, action_type);
+            return "break"        
+end
+
+        if aztup_options.filters.Value["Dont Parry If Typing"] and not aztup.automation:has_any() then
+            local l_ChatInputBarConfiguration_0 = services.TextChatService:FindFirstChild("ChatInputBarConfiguration");
+            if services.UserInputService:GetFocusedTextBox() or l_ChatInputBarConfiguration_0 and l_ChatInputBarConfiguration_0.IsFocused then
+                debug_print("[%s] Skipping action %i, Input box is focused.", name, index);
+                return "continue"            
+end
+        end
+
+        return nil    
+end
+
+    
+    
+    
+    
+    local function check_chime_and_gale(self, track, action, name, index)
+        if aztup_options.filters.Value["Dont Parry In Chime Countdown"] and is_chime then
+            local simple_prompt = local_player.instance:FindFirstChild("SimplePrompt", true);
+            if simple_prompt then
+                if simple_prompt:GetAttribute("CurPrompt") and simple_prompt:GetAttribute("CurPrompt") > 1 and simple_prompt:GetAttribute("CurPrompt") < 15 then
+                    debug_print("[%s] In chime countdown for %i & %i, skipping action %i", name, simple_prompt:GetAttribute("CurPrompt"), workspace.DistributedGameTime, index);
+                    return "continue"                
+end
+            end
+        end
+
+        return nil    
+end
+
+    local function fire_feint(hold_time)
+        local character_handler = local_player.character:FindFirstChild("CharacterHandler");
+        local feint_release = character_handler and character_handler:FindFirstChild("FeintRelease", true);
+        local feint_click = KeyHandler:get_key("FeintClick");
+
+        if not feint_release or not feint_click then
+            return false        
+end;
+
+        feint_click:FireServer({
+            A = false,
+            Left = false,
+            S = false,
+            NOAERIALS = false,
+            Space = false,
+            Right = true,
+            W = false,
+            D = false
+        })
+
+        task.wait(hold_time or 0.05);
+
+        feint_release:FireServer({
+            A = false,
+            Left = false,
+            S = false,
+            NOAERIALS = false,
+            Space = false,
+            Right = false,
+            W = false,
+            D = false
+        })
+
+        return true    
+end
+
+    local feint_cooldown_effects = {
+        M1 = "FeintCool",
+        Spell = "SpellFeintCooldown",
+    };
+
+    local function on_feint_cooldown(own_action_type)
+        local effect_name = feint_cooldown_effects[own_action_type];
+        return effect_name ~= nil and EffectReplicator:FindEffect(effect_name) ~= nil    
+end
+
+    local function feint_own_attack_before_parry()
+        if not aztup.flags.auto_feint then
+            return        
+end;
+
+        if not EffectReplicator:FindEffect("LightAttack") and not EffectReplicator:FindEffect("MidAttack") then
+            return        
+end;
+
+        local own_action_type = self_anim_data.timing and self_anim_data.timing.action_type;
+        if not own_action_type or not aztup_options.auto_feint_own_tags.Value[own_action_type] then
+            return        
+end;
+
+        if on_feint_cooldown(own_action_type) then
+            return        
+end;
+
+        debug_print("[Auto Feint] Mid-swing while trying to parry, feinting first.");
+        fire_feint();
+    end
+
+    
+    
+    
+    
+    local function execute_resolved_action(self, type, action, data)
+        if type == "Parry" then
+            feint_own_attack_before_parry();
+
+            if (action.allow_parry_to_roll or data.allow_parry_to_roll) and not aztup_options.filters.Value["Dont Roll"] then
+                DefendActionManager:queue_generic_parry_task(self.entity);
+            else
+                DefendActionManager:queue_generic_parry_task_no_convert(self.entity);
+            end;
+        elseif type == "Dodge" then
+            DefendActionManager:add_action(self.entity, "dodge", tick());
+        elseif type == "Forced Full Dodge" then
+            DefendActionManager:defend_action_dodge({
+                mob = self.entity,
+                type = "dodge",
+                full = true,
+                when = tick()
+            });
+        elseif type == "Jump" or type == "Legit Jump" and not self.is_player then
+            local Safety = require("@src/utility/safety");
+            if #services.Players:GetPlayers() == 1 and type ~= "Legit Jump" then
+                local_player.character.CharacterHandler.Requests.Jump:FireServer()
+                local_player.root_part.CFrame *= CFrame.new(0, 50, 0)
+            else
+                local jump_func = nil;
+                local upvalues = getupvalues(base_require(game:GetService("ReplicatedStorage").Modules.CharacterControllers.Human));
+
+                for _, upvalue in upvalues do
+                    if typeof(upvalue) == "table" and rawget(upvalue, "Jump") then
+                        jump_func = rawget(upvalue, "Jump");
+                    end;
+                end;
+
+                if jump_func({
+                    Humanoid = local_player.humanoid,
+                    RootPart = local_player.root_part,
+                    GroundSensor = local_player.root_part:FindFirstChild("GroundSensor")
+                }) then
+                    local_player.character.CharacterHandler.Requests.Jump:FireServer()
+
+                    local jump_anim = local_player.humanoid:LoadAnimation(local_player.character.CharacterHandler.InputClient.Jump);
+                    jump_anim:Play(0.05);
+
+                    task.delay(0.4, function()
+                        jump_anim:AdjustSpeed(0.5);
+                        jump_anim:Stop(0.1);
+                    end);
+                end;
+            end
+        elseif type == "Start Block" then
+            DefendActionManager:add_action(self.entity, "block", tick());
+            self.blocked = true;
+        elseif type == "Crouch" then
+            task.spawn(function()
+                local_player.character:WaitForChild("CharacterHandler"):WaitForChild("Requests"):WaitForChild("ServerCrouch"):FireServer(true)
+                task.wait(1);
+                local_player.character:WaitForChild("CharacterHandler"):WaitForChild("Requests"):WaitForChild("ServerCrouch"):FireServer(false);
+            end)
+        end;
+    end
+
+    
+    
+    
+    
+    local function lookup_timing_data(id)
+        
+        local custom, custom_name = custom_timings:lookup(id);
+        if custom then
+            return custom, custom_name        
+end;
+
+        local data, pot_name;
+        local index = fast_timing_lookup_table[id];
+        local timing = index and timing_data[index];
+        if timing and id and typeof(id) == "string" and #id > 0 and timing.ids and table.find(timing.ids, id) then
+            data = timing;
+
+            if typeof(index) ~= "number" then
+                pot_name = index;
+            end;
+        end
+        return data, pot_name    
+end
+
+
+    
+    local function process_actions(self, track, data, pot_name, to_evaluate_actions, action_type, blocked_bi, blocked_af)
+        local current_rtt = Latency:get_ping()
+        local alotted = 0
+        local forced_roll_next
+
+        local track_state = self.running_tracks[track];
+        if track_state then
+            track_state.action_type = action_type;
+        end;
+
+        local root = self.entity:FindFirstChild("HumanoidRootPart")
+        if not root then
+            return
+        end
+
+        local magnitude = (root.Position - local_player.root_part.Position).Magnitude;
+        if self.is_player and magnitude > aztup.flags.dont_process_players_over_studs or not self.is_player and magnitude > aztup.flags.dont_process_mobs_over_studs then
+            return        
+end;
+
+        if self.entity.Name:match("squidward") or self.entity.Name:match("nautilodaunt") and tick() - self.last_feint_at <= 0.5 then
+            forced_roll_next = true;
+        end;
+
+        table.sort(to_evaluate_actions, function(a, b)
+            local a_time = a.when and a.when or 0
+            local b_time = b.when and b.when or 0
+            return a_time < b_time
+        end)
+
+        for index, action in to_evaluate_actions do
+            if track_state then
+                track_state.action = action;
+            end;
+
+            local starting_speed = track.Speed;
+            local hitbox = action.hitbox or Vector3.zero;
+            local offset = action.offset or CFrame.new();
+            local type = action.type or "Parry";
+            local ignore_anim_early_end = action.ignore_animation_early_end or data.ignore_animation_early_end;
+            local time = action.when or 0;
+            local name = action.name or data.name or pot_name or "Unidentified " .. track.Animation.AnimationId;
+
+            if data.ignore_hitbox_check or data.ignore_hitbox or action.ignore_hitbox_check then
+                action.ignore_hitbox = true;
+            end
+            
+            if action.half_size_offset then
+                offset -= Vector3.new(0, 0, hitbox.Z / 2)
+            end;
+            
+            if type == "End Block" and self.blocked then
+                local wait_time = (time - alotted) - current_rtt
+                task.wait(wait_time);
+                DefendActionManager:add_action(self.entity, "unblock", tick());
+                self.blocked = false;
+                continue            
+end;
+
+            local function in_hitbox(hide)
+                local inside;
+                if not action.ignore_hitbox then         
+                    if aztup.flags.mob_ai_breaker then
+                        action.extrapolate = false;
+                    end; 
+                    
+                    self.ball = action.shape == "ball";
+                    
+                    
+                    
+                    inside = self:in_hitbox(hitbox, offset or CFrame.new(), hide, action.predict, action.predict_time, action.predict_rotation, action.base_and_predict);
+                    
+                    self.ball = false;
+                end
+
+                return inside            
+end;
+
+            if typeof(hitbox) == "table" then
+                hitbox = Vector3.new(
+                    hitbox.X or 0,
+                    hitbox.Y or 0,
+                    hitbox.Z or 0
+                );
+            end;
+    
+            if typeof(offset) == "table" then
+                offset = CFrame.new(
+                    offset.X or 0,
+                    offset.Y or 0,
+                    offset.Z or 0
+                );
+            end;
+
+            
+
+            if action.delay_until_in_hitbox then
+                repeat
+                    task.wait();
+                until in_hitbox(true) or not action.ignore_early_end and not track_still_active(track, self.entity) and not ignore_anim_early_end;
+            end;
+
+            local start = tick();
+            local input_task = create_block_input_task(self, track, action, data, action_type, name, time, alotted, ignore_anim_early_end, blocked_bi, start, in_hitbox);
+            self:track_cleanup(track, function()
+                if not input_task.removed then
+                    input_task:remove();
+                end;
+            end);
+
+            if track.Speed > 50 then
+                input_task:remove();
+                break            
+end;
+
+            local chance_entry = chance_store:get_entry(data.name or pot_name or action.name);
+            local continue_with_parry = true;
+
+            local variation_weights = chance_entry and (chance_entry.outcome_weights or chance_entry.fail_weights or chance_entry.fail_actions);
+            local variation_result = variation_weights and DefendActionManager:execute_failed_parry_variation(self.entity, variation_weights) or "Parry";
+            continue_with_parry = variation_result == "Parry" or variation_result == "Dodge";
+
+            if not continue_with_parry then
+                debug_print("[%s] Action %i chance roll -> %s.", name, index, variation_result);
+                input_task:remove();
+                continue            
+end;
+            
+            if math.random() >= (aztup.flags[self.flag .. "parry_chance"] / 100) then
+                if not action.ignore_hitbox and in_hitbox(true) or action.ignore_hitbox then
+                    debug_print("[%s] Skipping action %i due to global parry chance.", name, index);
+                end;                
+
+                input_task:remove();
+                continue            
+end;
+
+            local wait_time = (time - alotted) - current_rtt
+
+            local notifs = {};
+            if wait_time > 0 and wait_time == wait_time and wait_time < 60000 then
+                    task.delay(wait_time - (1 / 15), function()
+                        if aztup.flags.auto_feint and not blocked_af then
+                            if check_action_preconditions_auto_feint(self, track, action, data, action_type, name, index, in_hitbox) then
+                                return                            
+end;
+
+                            if check_action_situation_filters(self, track, action, action_type, name, index) then
+                                return                            
+end;
+
+                            if not action.ignore_early_end and not track_still_active(track, self.entity) and not ignore_anim_early_end then
+                                return                            
+end
+
+                            if anti_ap_breaker:final_check(self, track) then
+                                return                            
+end
+
+                            if not EffectReplicator:FindEffect("LightAttack") and not EffectReplicator:FindEffect("MidAttack") then
+                                if not notifs.b then
+                                    debug_print("[Auto Feint] Skipping because not in a attack.");
+                                    notifs.b = true;
+                                end;
+                                return                            
+elseif not notifs.a then
+                                notifs.a = true;
+                                debug_print("[Auto Feint] Attempting to feint.");
+                            end;
+
+                            local own_action_type = self_anim_data.timing and self_anim_data.timing.action_type;
+                            if not own_action_type or not aztup_options.auto_feint_own_tags.Value[own_action_type] then
+                                return debug_print("[Auto Feint] Skipping, our move type '%s' isn't selected.", tostring(own_action_type))                            
+end;
+
+                            if on_feint_cooldown(own_action_type) then
+                                return debug_print("[Auto Feint] Skipping, '%s' feint is on cooldown.", own_action_type)                            
+end;
+
+                            fire_feint();
+                        end;
+                    end);
+
+                task.wait(wait_time)
+                alotted += wait_time
+            elseif wait_time ~= wait_time or wait_time > 0 then
+                return debug_print("[%s] Skipping action %i, wait time invalid: %.2f", name, index, wait_time)            
+end;
+
+            if not input_task.removed then
+                input_task:remove();
+            end;
+
+            if anti_ap_breaker:final_check(self, track) then
+                tasks = math.max(0, tasks - 1);
+                return            
+end
+
+            
+            
+            
+            
+            
+
+            if not action.ignore_early_end and not track_still_active(track, self.entity) and not ignore_anim_early_end then
+                debug_print("[%s] Skipping action %i, animation ended early.", name, index);
+                continue            
+end
+
+            if type == "RPUE Parry" then
+                local blocked = false;
+                while action.condition() do
+                    if action.should() then
+                        blocked = true;
+                        DefendActionManager.block:FireServer();
+                        task.delay(0, function()
+                            DefendActionManager.unblock:FireServer();
+                        end)
+                    end;
+                    action.wait();
+                end;
+
+                if blocked then
+                    task.wait();
+                    DefendActionManager.unblock:FireServer();
+                end;
+                continue            
+end;
+
+            if check_action_preconditions(self, track, action, data, action_type, name, index, in_hitbox) then
+                continue            
+end;
+
+            if aztup.flags[self.flag .. "roll_if_unequipped"] and not EffectReplicator:FindEffect("Equipped") and type == "Parry" then
+                type = "Dodge";
+            end;
+
+            if forced_roll_next and type == "Parry" then
+                type = "Dodge";
+                forced_roll_next = false;
+            end;
+
+            if aztup.flags[self.flag .. "auto_equip"] and not EffectReplicator:FindEffect("Equipped") then
+                local character_handler = local_player.character:FindFirstChild("CharacterHandler");
+                local requests = character_handler and character_handler:FindFirstChild("Requests");
+                local equip_weapon = requests and requests:FindFirstChild("DrawWeapon");
+
+                if equip_weapon then
+                    task.delay(0.1 + (math.random() / 1000), function()
+                        equip_weapon:FireServer(true);
+                    end);
+                else
+                    debug_print("failed to find 'DrawWeapon'");
+                end;
+            end;
+
+            local situation_skip = check_action_situation_filters(self, track, action, action_type, name, index)
+            if situation_skip == "continue" then
+                continue            
+elseif situation_skip == "break" then
+                break            
+end;
+
+            local chime_gale_skip = check_chime_and_gale(self, track, action, name, index)
+            if chime_gale_skip == "continue" then
+                continue            
+elseif chime_gale_skip == "return" then
+                return            
+end;
+
+            if aztup.flags.log_speed_changes then
+                if starting_speed == track.Speed then
+                    debug_print("[%s] Performing action %i: %s (%.2fs srtt -> %.2fs, %.2f speed)", name, index, type, current_rtt, Latency:get_ping(), starting_speed); 
+                else
+                    debug_print("[%s] Performing action %i: %s (%.2fs srtt -> %.2fs, %.2f -> %.2f speed)", name, index, type, current_rtt, Latency:get_ping(), starting_speed, track.Speed);
+                end
+            else
+                debug_print("[%s] Performing action %i: %s (%.2fs srtt -> %.2fs)", name, index, type, current_rtt, Latency:get_ping()); 
+            end;
+
+            if variation_result ~= "Parry" then
+                debug_print("[%s] Action %i chance roll -> %s.", name, index, variation_result);
+            end
+
+            if variation_result == "Dodge" then
+                type = "Dodge";
+                debug_print("[%s] switched action %i to dodge.", name, index);
+            end
+
+            if type == "Parry" and (not action.ignore_auto_parry_frames and in_parry_frames) and aztup_options.filters.Value["Dont Parry In AP Frames"] then
+                debug_print("[%s] In parry frames. Skipping action %i", name, index);
+                continue            
+end;
+
+            
+            
+            
+            
+
+            if aztup.flags.ap_randomization and type == "Parry" then
+                local chance = aztup.flags["parry_to_dodge_chance_" .. (data.action_type or "undefined"):lower()] or 0
+                local can = not aztup.flags.only_convert_dodge_if_possible or aztup.flags.only_convert_dodge_if_possible and local_player.tracker:can_dodge()
+
+                if random:NextNumber() <= chance / 100 and can then
+                    type = "Dodge";
+                    debug_print("[%s] Randomized action %i to dodge.", name, index);
+                end;
+            end;
+
+            if action.prefer_dodge and local_player.tracker:can_dodge() then
+                type = "Dodge";
+                debug_print("[%s] Action %i prefers dodge.", name, index);
+            end;
+
+            if (action.allow_parry_to_roll or data.allow_parry_to_roll) and not local_player.tracker:can_parry() then
+                if local_player.tracker:can_dodge() then
+                    type = "Dodge";
+                    debug_print("[%s] Parry on CD, rolling instead.", name);
+                end;
+            end
+
+            if aztup_options.filters.Value["Dont Roll"] and (type == "Dodge" or type == "Forced Full Dodge") then
+                debug_print("[%s] Skipping action %i, Roll is disabled.", name, index);
+                continue            
+end;
+
+            if aztup_options.filters.Value["Dont Parry If Not In Combat"] and not EffectReplicator:FindEffect("Danger") then
+                debug_print("[%s] Skipping action %i, Not in danger.");
+                continue            
+end;
+            
+            execute_resolved_action(self, type, action, data);
+
+            if action.no_more_actions then break end
+        end
+    end
+    
+    
+    
+    
+    local function log_info_if_enabled(self, track)
+        if not (aztup.flags.info_logger and self.entity:FindFirstChild("HumanoidRootPart") and self.entity.Name ~= local_player.character.Name) then
+            return        
+end
+
+        local dist = (local_player.root_part.Position - self.entity.HumanoidRootPart.Position).Magnitude;
+        if dist > aztup.flags.info_logger_range then
+            return        
+end
+
+        task.spawn(function()
+            local name = getInfo(track.Animation.AnimationId:match("%d+")).Name
+            if name:lower():match("parried") then return end
+            if name:lower():match("idle") then return end
+
+            local disallowed = false;
+            local assets = game:GetService("ReplicatedStorage"):FindFirstChild("Assets");
+            for _, anim in assets.Anims.Movement:GetDescendants() do
+                if anim:IsA("Animation") and anim.AnimationId == track.Animation.AnimationId then
+                    disallowed = true;
+                    break                
+end;
+            end
+
+            if disallowed then return end
+
+            Library:AddTextToInfoLogger(string.format("%s %s %s", name, tostring(track.Animation.AnimationId:match("%d+")), self.entity.Name), tostring(track.Animation.AnimationId:match("%d+")), function()
+                if getgenv().timing_builder then getgenv().timing_builder:load_track(track, self.entity); end;
+            end, 60);
+        end);
+    end
+
+    local asset_id = require("@src/utility/asset_id");
+    function AnimatorHandler:run(track: AnimationTrack)
+        local ap = aztup.flags.auto_parry
+        local breaker = aztup.flags.ap_breaker
+        local asc = aztup.features.anim_speed_changer
+
+        if not ap and not breaker and not asc then return end
+        if not track or not track.Animation then return end
+        if not EffectReplicator then return end
+        if not local_player.character then return end
+
+        if self.entity.Name ~= local_player.character.Name and not ap then return end
+
+        local id, err = asset_id.get_id(track.Animation.AnimationId);
+        if (self.is_player and mobsAnims[id]) or err or not id then
+            return        
+end;
+
+        local data, pot_name = lookup_timing_data(id);
+
+        log_info_if_enabled(self, track);
+
+        if not data or tasks >= (aztup.flags.task_concurrency or 25) then
+            return        
+end;
+
+        task.wait(1 / 60); 
+        if anti_ap_breaker:initial_check(self, track) then 
+            tasks = math.max(0, tasks - 1);
+            return 
+        end
+        
+        if is_chime then
+            local alive = track.IsPlaying or not anti_ap_breaker:is_fully_dead(track, self.entity);
+            if track.WeightTarget <= 0.050 and (track.WeightCurrent < 0.050 or not alive) then
+                return            
+end;
+        end;
+
+        if data.enc then
+            
+            
+
+data = table.clone(data);
+            data = process(data);
+
+        end
+
+        local str = pot_name or data.name or data.actions and data.actions[1] and data.actions[1].name;
+        if str and aztup_options.blocked_timings.Value[str] then return end
+    
+        if self.entity.Name == local_player.character.Name then
+
+
+            local action_type = data.action_type or "Undefined";
+            if action_type == "M1" then
+                aztup.features.ap_breaker.last_m1_anim = track.Animation.AnimationId;
+            end;
+    
+            if aztup.features.tester_ap_breaker and aztup.features.tester_ap_breaker.handle and aztup.flags.tester_ap_breaker then
+                aztup.features.tester_ap_breaker:handle(track, data);
+            end
+
+            if aztup.features.anim_speed_changer then
+                aztup.features.anim_speed_changer:handle(track, data);
+            end
+                
+            if aztup_options.aggressive_3_break_on.Value[({
+                ["Critical"] = "Criticals",
+                ["Untagged"] = "Untagged",
+                ["Spell"] = "Spells",
+                ["Bell"] = "Bells",
+                ["M1"] = "M1s"
+            })[action_type] ] then
+                break_anims(track, data, action_type, self); 
+            end
+
+            self_anim_data = { 
+                timing = data,
+                track = track,
+                when = tick()
+            };
+            return        
+end;
+    
+        if not TargetFilter.is_allowed(self.entity, aztup_options.allowed_targets.Value) then
+            return
+        end
+    
+        if aztup_options.filters.Value["Dont Parry If Guildmate"] then
+            local player = services.Players:GetPlayerFromCharacter(self.entity);
+            if player and general:is_teammate(player) then
+                return            
+end
+        end
+
+        self.running_tracks[track] = { thread = coroutine.running(), feint_threads = {}, cleanups = {} };
+
+        local actions = action_builder.new({ signal = true })
+        local to_evaluate_actions
+
+        tasks += 1;
+        task.delay(1, function()
+            tasks -= 1;
+        end);
+        if data.run then
+            
+            
+            
+    
+            local base_env = getfenv(data.run)
+            local signal_actions = {} 
+    
+            actions:get_signal():connect(function(aid)
+                local a = actions.actions[aid]
+                if not a then 
+                    return 
+                end
+    
+                
+                table.insert(signal_actions, a)
+    
+                
+                local single = { a }
+    
+                local action_type = data.action_type or "Undefined"
+                local blocked_bi = aztup_options.blocked_safe_input_moves.Value[action_type]
+                local blocked_af = aztup_options.blocked_auto_feint_moves.Value[action_type]
+    
+                process_actions(self, track, data, pot_name, single, action_type, blocked_bi, blocked_af)
+            end)
+    
+            local fake_env = setmetatable({
+                track = track,
+                defender = self,
+                self = {
+                    distance = function()
+                        return (local_player.root_part.Position - self.entity.HumanoidRootPart.Position).Magnitude
+                    end,
+                    is_playing = function()
+                        return track_still_active(track, self.entity)
+                    end,
+                },
+                weapon = require("@src/features/auto-parry/data/weapon").data(self.entity) or {},
+                mantra = require("@src/features/auto-parry/data/mantra"),
+                thrown = workspace:FindFirstChild("Thrown"),
+            }, {
+                __index = base_env,
+            })
+            setfenv(data.run, fake_env)
+            data.run(actions, self)
+            setfenv(data.run, base_env)
+    
+            
+            
+            
+            to_evaluate_actions = actions:get()
+            if #to_evaluate_actions > 0 then
+                local action_type = data.action_type or "Undefined"
+                local blocked_bi = aztup_options.blocked_safe_input_moves.Value[action_type]
+                local blocked_af = aztup_options.blocked_auto_feint_moves.Value[action_type]
+    
+                process_actions(self, track, data, pot_name, to_evaluate_actions, action_type, blocked_bi, blocked_af)
+            end
+
+            self.running_tracks[track] = nil;
+            return
+        else
+            for _, action in data.actions do
+                actions.pending_action = action
+                actions:push()
+            end
+            to_evaluate_actions = data.actions or actions:get()
+        end
+    
+        local action_type = data.action_type or "Undefined"
+        local blocked_bi = aztup_options.blocked_safe_input_moves.Value[action_type]
+        local blocked_af = aztup_options.blocked_auto_feint_moves.Value[action_type]
+    
+        process_actions(self, track, data, pot_name, to_evaluate_actions, action_type, blocked_bi, blocked_af)
+
+        self.running_tracks[track] = nil;
+    end;
+
+    local last_mid_attack = tick();
+    EffectReplicatorHandler:hook("added", function(effect)
+        if effect.Class == "MidAttack" then
+            last_mid_attack = tick();
+        elseif effect.Class == "DelayedPayback" then
+            last_payback_delay_time = tick();
+        end;
+
+        return nil    
+end);
+
+    EffectReplicatorHandler:hook("removed", function(effect)
+        if effect.Class == "MidAttack" then
+            last_mid_attack_delay = (tick() - last_mid_attack) - Latency:half_ping()
+        end 
+
+        return nil    
+end);
+
+    InstanceWatcher.new(workspace:WaitForChild("Live"), function(entity)
+        local start = tick();
+    
+        repeat task.wait() until entity:FindFirstChild("Animator", true) or tick() - start > 5;
+        return entity:FindFirstChild("Animator", true)    
+end, function(entity)   
+        if not entity:IsA("Model") then return end
+        AnimatorHandler.new(entity);
+    end);
+end)()]];
+module_map["src/features/auto-parry/handlers/anti-ap-breaker"] = [[
+local anti_ap_breaker = {}
+
+local dead_tracks = setmetatable({}, { __mode = "k" })
+local track_seen_at = setmetatable({}, { __mode = "k" })
+local priority_cache = {};
+
+function anti_ap_breaker:on()
+    return aztup.flags.basic_validation
+end
+
+function anti_ap_breaker:compatibility()
+    return aztup.flags.compatibility_mode_anti_ap_breaker
+end
+
+function anti_ap_breaker:is_filter_on(flag)
+    return aztup_options.validation_filters.Value[flag]
+end;
+
+function anti_ap_breaker:is_filter_log_on(flag)
+    return aztup_options.validation_log_filters.Value[flag]
+end;
+
+function anti_ap_breaker:log(type, ...)
+    
+    if not aztup.flags.anti_ap_breaker_debug then return end
+    if not self:is_filter_log_on(type) then return end
+
+    setthreadidentity(8)
+    Logger:short_notify("[Anti AP]", string.format(...))
+end
+
+function anti_ap_breaker:initial_check(defender, track)
+    if not defender.is_player or not self:on() then
+        return false    
+end
+
+    
+    if track.Speed >= aztup.flags.anti_ap_breaker_max_speed and self:is_filter_on("S >= X (S = Speed)") then
+        self:log("S >= X (S = Speed)", "Speed is too high, Speed: %.1f", track.Speed)
+        return true
+    end;
+
+    if track.Length / track.Speed <= (aztup.flags.anti_ap_breaker_length_ms / 1000) and self:is_filter_on("Length <= Xms") then
+        self:log("Length <= Xms", "Length is too short, Length: %.1f", track.Length)
+        return true
+    end;
+
+    if track.Priority == Enum.AnimationPriority.Core and self:is_filter_on("Core Priority") then
+        self:log("Core Priority", "Track is core priority")
+        return true
+    end;
+
+    if track.Priority == Enum.AnimationPriority.Idle and self:is_filter_on("Idle Priority") then
+        self:log("Idle Priority", "Track is idle priority")
+        return true
+    end;
+
+    if track.Speed == 0 and self:is_filter_on("Speed == 0") then 
+        return self:log("Speed == 0", "Track is frozen")    
+end
+
+    track_seen_at[track] = tick();
+    priority_cache[track] = track.Priority;
+
+    task.delay(30, function()
+        priority_cache[track] = nil;
+    end);
+
+    return false
+end;
+
+function clamp(val, min, max)
+    if val < min then return min end
+    if val > max then return max end
+
+    return val
+end;
+
+function anti_ap_breaker:handle_fadetime(track)
+    return track.WeightCurrent < clamp(clamp(track.WeightTarget / 2, 1 / 120, tick() - (track_seen_at[track] or 0)), 0, 0.2)
+end;
+
+local asset_id = require("@src/utility/asset_id")
+function anti_ap_breaker:handle_priority_hiding(defender, track)
+    local humanoid = defender.entity:FindFirstChild("Humanoid");
+    local hidden_count = 0;
+    local highest_priority = 1000;
+    
+    for _, other_track in humanoid:GetPlayingAnimationTracks() do
+        if track == other_track then continue end
+        if other_track.Priority.Value == 1000 then continue end
+        if track.Priority.Value >= other_track.Priority.Value then continue end;
+        if other_track.WeightCurrent <= track.WeightCurrent / 2 then continue end
+        if other_track.WeightTarget <= 0.3 then continue end
+        if other_track.Speed == 0 and other_track.TimePosition >= track.Length - 0.01 or other_track.TimePosition <= 0.01 then continue end;
+        if not asset_id.get_id(other_track.Animation.AnimationId) then continue end
+        if self:final_check(defender, other_track, true) then continue end
+        hidden_count += 1;
+        
+        if highest_priority > other_track.Priority.Value then
+            highest_priority = other_track.Priority.Value;
+        end; 
+    end
+
+    return highest_priority ~= 1000 and highest_priority > track.Priority.Value
+end;
+
+function anti_ap_breaker:final_check(defender, track, skip)
+    if not self:on() then
+        return false    
+end
+    
+        
+    local alive = self:is_playing(track, defender.entity);
+    if alive and self:handle_fadetime(track) and self:is_filter_on("Fadetime") then 
+        if not skip then
+            self:log("Fadetime", "Track is faded", track.WeightCurrent)
+        end;
+        return true
+    end;
+    
+    if track.WeightTarget <= (aztup.flags.anti_ap_breaker_minimum_wt / 100) and self:is_filter_on("WT <= X (WT = WeightTarget)") then 
+        if track.WeightCurrent < (aztup.flags.anti_ap_breaker_minimum_wt / 100) or not alive then
+            if not skip then
+                self:log("WT <= X (WT = WeightTarget)", "Track is too lightweight. WT - %.2f, WC - %.2f", track.WeightTarget, track.WeightCurrent)
+            end;
+            return true
+        end;
+    end;
+
+    if self:is_filter_on("Priority Hiding") and not skip and self:handle_priority_hiding(defender, track) then
+        if not skip then
+            self:log("Priority Hiding", "Track is hidden behind another anims priority.");
+        end;
+        return true
+    end
+    
+    return false
+end;
+
+function anti_ap_breaker:is_fully_dead(track, entity)
+    return not table.find(entity:FindFirstChild("Humanoid"):GetPlayingAnimationTracks(), track)
+end;
+
+function anti_ap_breaker:is_playing(track, entity)
+    return track.IsPlaying or table.find(entity:FindFirstChild("Humanoid"):GetPlayingAnimationTracks(), track)
+end;
+
+return anti_ap_breaker]];
+module_map["src/features/auto-parry/handlers/effect-handler"] = [[
+local action_builder = require("@src/features/auto-parry/data/effect-action")
+
+local requests = services.ReplicatedStorage:FindFirstChild("Requests") or services.ReplicatedStorage:WaitForChild("Requests");
+local client_effect = requests:FindFirstChild("ClientEffect") or requests:WaitForChild("ClientEffect")
+
+local effect_names = {}
+local effect_data_map = {}
+
+task.spawn(function() 
+	for _, module in list_modules("features/auto-parry/data/effects/*") do
+		local success, effect_data = pcall(require, module)
+		if not success or typeof(effect_data) ~= "table" or not effect_data.id then
+			warn(module, "invalid@effect-handler")
+			continue
+		end
+	
+		effect_data_map[effect_data.id] = effect_data
+		table.insert(effect_names, effect_data.name or effect_data.id)
+	end
+	
+	getgenv().effect_names = effect_names
+end)
+
+local function debug_print(...)
+	if not (aztup and aztup.flags and aztup.flags.auto_parry_debug) then return end
+	setthreadidentity(8)
+	Logger:short_notify(string.format(...))
+end
+aztup.maid:give_task(client_effect.OnClientEvent:Connect(function(effectName, effectData)
+	
+	if not (aztup and aztup.flags and aztup_options and local_player) then return end
+	if not aztup.flags.auto_parry and effectName ~= "EnforcerPull" then return end
+	if effectName == "EnforcerPull" and not aztup.flags.no_enforcer_pull then return end
+
+	local data = effect_data_map[effectName]
+	if not data then return end
+
+    local str = data.name or data.actions and data.actions[1] and data.actions[1].name;
+    if str and aztup_options.blocked_timings.Value[str] then return end
+
+	local actions = action_builder.new()
+
+	actions:get_signal():connect(function(id)
+		local action = actions.actions[id]
+		if not action then return end
+
+		if not local_player.character or not local_player.root_part then return end
+
+		local user = action.user
+		if not user then return end
+		if not TargetFilter.is_allowed(user, aztup_options.allowed_targets.Value) then return end
+
+		local hitbox = action.hitbox or Vector3.zero
+		local offset = action.offset or CFrame.new()
+		local typ = action.type or "Parry"
+		local when_s = action.when or 0
+		local name = action.name or data.name or effectName
+		local ignore_hitbox = action.ignore_hitbox
+
+		local user_root = user:FindFirstChild("HumanoidRootPart")
+		if not user_root then return end
+
+		local ping = (Latency and Latency.get_ping and Latency:get_ping()) or 0
+		local delay_s = when_s - ping
+
+		local input_task = (data.allow_block_input
+			and not aztup_options.blocked_safe_input_moves.Value["Effects"]
+			and BlockInputManager:add_task(
+				name,
+				user,
+				function()
+					if EffectReplicator:FindEffect("Knocked") then return end
+					return ignore_hitbox
+						or (not general:in_hitbox(hitbox, offset, local_player.root_part.CFrame, user_root.CFrame, false, action.shape == "ball"))
+				end
+			)) or { remove = function() end }
+
+		if delay_s > 0 then
+			task.wait(delay_s)
+		end
+
+		input_task:remove()
+
+		if not ignore_hitbox and not general:in_hitbox(hitbox, offset, local_player.root_part.CFrame, user_root.CFrame, not aztup.flags.view_hitboxes, action.shape == "ball") then
+			return
+		end
+
+		local user_flag = (user.Name:sub(1, 1) == ".") and "pve_" or "pvp_"
+
+		if EffectReplicator:FindEffect("Knocked") and aztup_options.filters.Value["Dont Parry If Knocked"] then
+			debug_print("[%s] Knocked, Skipping action %s", name, typ)
+			return
+		end
+
+		if aztup.flags[user_flag .. "roll_if_unequipped"] and not EffectReplicator:FindEffect("Equipped") and typ == "Parry" then
+			typ = "Dodge"
+		end
+
+		if aztup.flags[user_flag .. "auto_equip"] and not EffectReplicator:FindEffect("Equipped") then
+			local character_handler = local_player.character:FindFirstChild("CharacterHandler")
+			local requests = character_handler and character_handler:FindFirstChild("Requests")
+			local equip_weapon = requests and requests:FindFirstChild("DrawWeapon")
+			if equip_weapon then
+				task.delay(0.1 + (math.random() / 1000), function()
+					equip_weapon:FireServer(true)
+				end)
+			else
+				debug_print("failed to find 'DrawWeapon'")
+			end
+		end
+
+		if aztup_options.filters.Value["Dont Parry If Holding Block"] and general:is_holding_f() then
+			setthreadidentity(8)
+			debug_print("[%s] Skipping action, Holding F.", name)
+			return
+		end
+
+		local chance_entry = chance_store:get_entry(data.name or effectName)
+		local variation_weights = chance_entry and (chance_entry.outcome_weights or chance_entry.fail_weights or chance_entry.fail_actions)
+		local variation_result = variation_weights and (DefendActionManager :: any):execute_failed_parry_variation(user, variation_weights) or "Parry"
+		if variation_result ~= "Parry" and variation_result ~= "Dodge" then
+			return debug_print("[%s] Action %i chance roll -> %s", name, id, variation_result)
+		end
+
+		if variation_result ~= "Parry" then
+			debug_print("[%s] Action %i chance roll -> %s", name, id, variation_result)
+		end
+
+		if math.random() >= (aztup.flags[user_flag .. "parry_chance"] / 100) then
+			debug_print("[%s] Skipping action %i due to global parry chance.", name, id)
+			return
+		end 
+		
+		if aztup_options.filters.Value["Dont Parry In Chime Countdown"] and is_chime then
+			local simple_prompt = local_player.instance:FindFirstChild("SimplePrompt", true);
+			if simple_prompt then
+				if simple_prompt:GetAttribute("CurPrompt") and simple_prompt:GetAttribute("CurPrompt") > 1 then
+					debug_print("[%s] In chime countdown, skipping action %i", name, id);
+					return				
+end
+			end
+		end
+
+		debug_print("[%s] Performing action %i: %s", name, id, typ)
+
+		if variation_result == "Dodge" then
+			typ = "Dodge"
+			debug_print("[%s] switched action %i to dodge.", name, id)
+		end
+
+		if typ == "Parry" then
+			if action.allow_parry_to_roll then
+				DefendActionManager:queue_generic_parry_task(user)
+			else
+				DefendActionManager:queue_generic_parry_task_no_convert(user)
+			end
+		elseif typ == "Dodge" then
+			DefendActionManager:add_action(user, "dodge", tick())
+		elseif typ == "Forced Full Dodge" then
+			DefendActionManager:defend_action_dodge({ mob = user, type = "dodge", full = true, when = tick() })
+		end
+
+		return true
+	end)
+
+	task.spawn(function()
+		if typeof(data.run) ~= "function" then return end
+		local base_env = getfenv(data.run)
+		local fake_env = setmetatable({
+			weapon = require("@src/features/auto-parry/data/weapon"),
+			mantra = require("@src/features/auto-parry/data/mantra"),
+			thrown = workspace:FindFirstChild("Thrown"),
+		}, { __index = base_env })
+		setfenv(data.run, fake_env)
+		local ok, err = pcall(data.run, actions, effectData)
+		setfenv(data.run, base_env)
+		if not ok then
+			warn("effect-handler run() failed:", effectName, err)
+		end
+	end)
+end))]];
+module_map["src/features/auto-parry/handlers/part-handler"] = [[
+local action_builder = require("@src/features/auto-parry/data/effect-action")
+local projectile_timing_data = {}
+pcall(function()
+	projectile_timing_data = require("@src/features/auto-parry/data/projectile_timings")
+end)
+local projectile_source_path = "rw_projectile_timings.lua"
+
+local projectile_names = {}
+local projectile_effect_data_map = {}
+
+local function refresh_projectile_names()
+	table.clear(projectile_names)
+	local seen = {}
+
+	for _, map in { projectile_effect_data_map } do
+		for _, effect_data in map do
+			local name = effect_data.name or effect_data.id
+			if not seen[name] then
+				seen[name] = true
+				table.insert(projectile_names, name)
+			end
+		end
+	end
+
+	getgenv().projectile_names = projectile_names
+end
+
+local function set_projectile_effect_data(source, effect_data)
+	if typeof(effect_data) ~= "table" then
+		return false
+	end
+
+	effect_data.id = effect_data.id or source
+	if not effect_data.id then
+		return false
+	end
+
+	projectile_effect_data_map[effect_data.id] = effect_data
+	return true
+end
+
+local function rebuild_projectile_effect_data(source_data)
+	table.clear(projectile_effect_data_map)
+
+	for source, effect_data in source_data do
+		if not set_projectile_effect_data(source, effect_data) then
+			warn(source, "invalid@projectile-timing")
+		end
+	end
+
+	refresh_projectile_names()
+end
+
+rebuild_projectile_effect_data(projectile_timing_data)
+refresh_projectile_names()
+
+getgenv().load_projectile_timings = function(force_reload)
+	local source_data = projectile_timing_data
+
+	if force_reload then
+		local can_read_file = isfile and readfile and loadstring
+		if can_read_file then
+			local ok, src = pcall(function()
+				return readfile(projectile_source_path)
+			end)
+			if ok and typeof(src) == "string" and #src > 0 then
+				local chunk, reason = loadstring(src, projectile_source_path)
+				if chunk then
+					local success, result = pcall(chunk)
+					if success and typeof(result) == "table" then
+						source_data = result
+					else
+						warn(string.format("[projectile timings] failed to run '%s': %s", projectile_source_path, tostring(result)))
+					end
+				else
+					warn(string.format("[projectile timings] failed to compile '%s': %s", projectile_source_path, tostring(reason)))
+				end
+			else
+				
+			end
+		end
+	end
+
+	rebuild_projectile_effect_data(source_data)
+end
+
+pcall(function()
+	if LPH_OBFUSCATED and not getgenv().allowed_to_load_timings then
+		return
+	end
+
+	getgenv().load_projectile_timings(true)
+end)
+
+if not LPH_OBFUSCATED and not is_chime then
+	local last_update = tick()
+	aztup.maid:give_task(services.RunService.RenderStepped:Connect(function()
+		if tick() - last_update <= 0.5 then return end
+		if not getgenv().dev_tools_data or not getgenv().dev_tools_data["hot-reload-timings"] then return end
+		if not services.UserInputService:IsKeyDown(Enum.KeyCode.Backquote) then return end
+
+		Logger:notify_sound("Reloaded projectile timings.")
+		last_update = tick()
+		xpcall(function()
+			getgenv().load_projectile_timings(true)
+		end, warn)
+		last_update = tick()
+	end))
+end
+
+local function debug_print(...)
+	if not (aztup and aztup.flags and aztup.flags.auto_parry_debug) then return end
+	setthreadidentity(8)
+	Logger:short_notify(string.format(...))
+end
+local thrown = workspace:WaitForChild("Thrown", 9e9);
+aztup.maid:give_task(thrown.DescendantAdded:Connect(function(part)
+	
+	if not (aztup and aztup.flags and aztup_options and local_player) then return end
+	if not aztup.flags.auto_parry then return end
+
+	local data;
+	for _, item in projectile_effect_data_map do
+		if item.is and item.is(part) then
+			data = item
+			break
+		end
+	end
+
+	if not data then return end
+
+    local str = data.name or data.actions and data.actions[1] and data.actions[1].name;
+    if str and aztup_options.blocked_timings.Value[str] then return end
+	
+	local actions = action_builder.new()
+
+	actions:get_signal():connect(function(id)
+		local action = actions.actions[id]
+		if not action then return end
+
+		if not local_player.character or not local_player.root_part then return end
+
+		local user = action.user
+		if not user then return end
+		if not TargetFilter.is_allowed(user, aztup_options.allowed_targets.Value) then return end
+
+		local hitbox = action.hitbox or Vector3.zero
+		local offset = action.offset or CFrame.new()
+		local typ = action.type or "Parry"
+		local when_s = action.when or 0
+		local name = action.name or data.name or "(no name set)"
+		local ignore_hitbox = action.ignore_hitbox
+
+		local user_root = part
+		if not user_root then return end
+
+		local ping = (Latency and Latency.get_ping and Latency:get_ping()) or 0
+		local delay_s = when_s - ping
+
+		local input_task = (data.allow_block_input
+			and not aztup_options.blocked_safe_input_moves.Value["Parts"]
+			and BlockInputManager:add_task(
+				name,
+				user,
+				function()
+					if EffectReplicator:FindEffect("Knocked") then return end
+					return ignore_hitbox
+						or (not general:in_hitbox(hitbox, offset, local_player.root_part.CFrame, user_root.CFrame, false, action.shape == "ball"))
+				end
+			)) or { remove = function() end }
+
+		if delay_s > 0 then
+			task.wait(delay_s)
+		end
+
+		input_task:remove()
+
+		if not ignore_hitbox and not general:in_hitbox(hitbox, offset, local_player.root_part.CFrame, user_root.CFrame, not aztup.flags.view_hitboxes, action.shape == "ball") then
+			return
+		end
+
+		local user_flag = (user.Name:sub(1, 1) == ".") and "pve_" or "pvp_"
+
+		if EffectReplicator:FindEffect("Knocked") and aztup_options.filters.Value["Dont Parry If Knocked"] then
+			debug_print("[%s] Knocked, Skipping action %s", name, typ)
+			return
+		end
+
+		if aztup.flags[user_flag .. "roll_if_unequipped"] and not EffectReplicator:FindEffect("Equipped") and typ == "Parry" then
+			typ = "Dodge"
+		end
+
+		if aztup.flags[user_flag .. "auto_equip"] and not EffectReplicator:FindEffect("Equipped") then
+			local character_handler = local_player.character:FindFirstChild("CharacterHandler")
+			local requests = character_handler and character_handler:FindFirstChild("Requests")
+			local equip_weapon = requests and requests:FindFirstChild("DrawWeapon")
+			if equip_weapon then
+				task.delay(0.1 + (math.random() / 1000), function()
+					equip_weapon:FireServer(true)
+				end)
+			else
+				debug_print("failed to find 'DrawWeapon'")
+			end
+		end
+
+		if aztup_options.filters.Value["Dont Parry If Holding Block"] and general:is_holding_f() then
+			setthreadidentity(8)
+			debug_print("[%s] Skipping action, Holding F.", name)
+			return
+		end
+
+		local chance_entry = chance_store:get_entry(data.name or data.id)
+		local variation_weights = chance_entry and (chance_entry.outcome_weights or chance_entry.fail_weights or chance_entry.fail_actions)
+		local variation_result = variation_weights and (DefendActionManager :: any):execute_failed_parry_variation(user, variation_weights) or "Parry"
+		if variation_result ~= "Parry" and variation_result ~= "Dodge" then
+			return debug_print("[%s] Action %i chance roll -> %s", name, id, variation_result)
+		end
+
+		if variation_result ~= "Parry" then
+			debug_print("[%s] Action %i chance roll -> %s", name, id, variation_result)
+		end
+
+		if math.random() >= (aztup.flags[user_flag .. "parry_chance"] / 100) then
+			debug_print("[%s] Skipping action %i due to global parry chance.", name, id)
+			return
+		end 
+		
+		if aztup_options.filters.Value["Dont Parry In Chime Countdown"] and is_chime then
+			local simple_prompt = local_player.instance:FindFirstChild("SimplePrompt", true);
+			if simple_prompt then
+				if simple_prompt:GetAttribute("CurPrompt") and simple_prompt:GetAttribute("CurPrompt") > 1 then
+					debug_print("[%s] In chime countdown, skipping action %i", name, id);
+					return				
+end
+			end
+		end
+
+		debug_print("[%s] Performing action %i: %s", name, id, typ)
+
+		if variation_result == "Dodge" then
+			typ = "Dodge"
+			debug_print("[%s] switched action %i to dodge.", name, id)
+		end
+
+		if typ == "Parry" then
+			if action.allow_parry_to_roll then
+				DefendActionManager:queue_generic_parry_task(user)
+			else
+				DefendActionManager:queue_generic_parry_task_no_convert(user)
+			end
+		elseif typ == "Dodge" then
+			DefendActionManager:add_action(user, "dodge", tick())
+		elseif typ == "Forced Full Dodge" then
+			DefendActionManager:defend_action_dodge({ mob = user, type = "dodge", full = true, when = tick() })
+		end
+
+		return true
+	end)
+
+	task.spawn(function()
+		if typeof(data.run) ~= "function" then return end
+		local base_env = getfenv(data.run)
+		local fake_env = setmetatable({
+			weapon = require("@src/features/auto-parry/data/weapon"),
+			mantra = require("@src/features/auto-parry/data/mantra"),
+			thrown = workspace:FindFirstChild("Thrown"),
+		}, { __index = base_env })
+		setfenv(data.run, fake_env)
+		local ok, err = pcall(data.run, actions, part)
+		setfenv(data.run, base_env)
+		if not ok then
+			warn("effect-handler run() failed:", data.name or data.id, err)
+		end
+	end)
+end))]];
+module_map["src/features/auto-parry/hitbox_simulator"] = [[
+local feature = Feature:new("show_hitbox_simulation");
+
+local runService = game:GetService("RunService")
+local players = game:GetService("Players")
+local currentSimulationPart = nil
+local isFeatureEnabled = false
+
+local defaultConfig = {
+    hitboxType = "Block",
+    sizeX = 4, sizeY = 4, sizeZ = 4,
+    shiftOffset = 0
+}
+
+local function getCurrentConfig()
+    local function get(opt)
+        return (opt and opt.Value ~= nil) and opt.Value or nil
+    end
+    return {
+        hitboxType = get(aztup_options.HS_HitboxType) or defaultConfig.hitboxType,
+        sizeX = get(aztup_options.HS_HitboxSizeX) or defaultConfig.sizeX,
+        sizeY = get(aztup_options.HS_HitboxSizeY) or defaultConfig.sizeY,
+        sizeZ = get(aztup_options.HS_HitboxSizeZ) or defaultConfig.sizeZ,
+        shiftOffset = get(aztup_options.HS_ShiftOffset) or defaultConfig.shiftOffset
+    }
+end
+
+local function cleanupSimulation()
+    if currentSimulationPart then
+        currentSimulationPart:Destroy()
+        currentSimulationPart = nil
+    end
+end
+
+local function runSimulationStep()
+    if not isFeatureEnabled then return end
+
+    local character = players.LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local config = getCurrentConfig()
+    local size = Vector3.new(config.sizeX, config.sizeY, config.sizeZ)
+    local usedCFrame = root.CFrame
+
+    if config.shiftOffset ~= 0 then
+        usedCFrame = usedCFrame * CFrame.new(0, 0, config.shiftOffset)
+    end
+
+    if not currentSimulationPart or currentSimulationPart.Parent ~= workspace then
+        if currentSimulationPart then currentSimulationPart:Destroy() end
+        currentSimulationPart = Instance.new("Part")
+        currentSimulationPart.Name = "HitboxSimulationPart"
+        currentSimulationPart.Anchored = true
+        currentSimulationPart.CanCollide = false
+        currentSimulationPart.CanQuery = false
+        currentSimulationPart.CanTouch = false
+        currentSimulationPart.Material = Enum.Material.ForceField
+        currentSimulationPart.CastShadow = false
+        currentSimulationPart.Transparency = 0.5
+    end
+
+    currentSimulationPart.Size = size
+    if config.hitboxType == "Block" then
+        currentSimulationPart.Shape = Enum.PartType.Block
+        currentSimulationPart.CFrame = usedCFrame
+    elseif config.hitboxType == "Ball" then
+        currentSimulationPart.Shape = Enum.PartType.Ball
+        currentSimulationPart.CFrame = usedCFrame
+    elseif config.hitboxType == "Cylinder" then
+        currentSimulationPart.Shape = Enum.PartType.Cylinder
+        currentSimulationPart.CFrame = usedCFrame * CFrame.Angles(0, 0, math.rad(90))
+    end
+    currentSimulationPart.Parent = workspace
+
+    local live = workspace:FindFirstChild("Live")
+    local instances = {}
+    if live then
+        for _, child in next, live:GetChildren() do
+            if child ~= character then
+                table.insert(instances, child)
+            end
+        end
+    end
+
+    if #instances > 0 then
+        local params = OverlapParams.new()
+        params.FilterDescendantsInstances = instances
+        params.FilterType = Enum.RaycastFilterType.Include
+        local ok, parts = pcall(function()
+            return workspace:GetPartsInPart(currentSimulationPart, params)
+        end)
+        currentSimulationPart.Color = (ok and parts and #parts > 0) and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+    else
+        currentSimulationPart.Color = Color3.fromRGB(255,0,0)
+    end
+end
+
+function feature:enable()
+    cleanupSimulation()
+    isFeatureEnabled = true
+end
+
+function feature:disable()
+    isFeatureEnabled = false
+    cleanupSimulation()
+end
+
+function feature:refresh()
+    if isFeatureEnabled then
+        cleanupSimulation()
+    end
+end
+
+aztup.maid:give_task(runService.RenderStepped:Connect(runSimulationStep))
+
+return feature]];
+module_map["src/features/auto-parry/services/position_prediction_service"] = [[
+
+local historys = {};
+local position_player = {};
+local objects = {};
+position_player.__index = position_player;
+
+position_player.make = function(player)
+    local self = setmetatable({}, position_player);
+    historys[player] = {};
+
+    self.player = player;
+
+    player.AncestryChanged:Connect(function()
+        local history = historys[player];
+        if history then
+            table.clear(history);
+            historys[player] = nil;
+        end;
+    end);
+
+    return self
+end;
+
+position_player.track = function(self, position)
+    local player = self.player;
+    local history = historys[player];
+
+    if #history >= 10 then
+        table.remove(history, 1);
+    end;
+
+    table.insert(history, {
+        timestamp = tick(),
+        position = position
+    });
+end;
+
+objects.__index = objects;
+
+aztup.maid:give_task(function()
+    for _, object in historys do
+        table.clear(object);
+        object = nil;
+    end;
+
+    table.clear(historys);
+    table.clear(objects);
+end);
+
+aztup.maid:give_task(services.Players.PlayerAdded:Connect(function(player)
+    objects[player] = position_player.make(player);
+end));
+
+for _, player in services.Players:GetPlayers() do
+    objects[player] = position_player.make(player);
+end;
+
+aztup.maid:give_task(services.Players.PlayerRemoving:Connect(function(player)
+    local history = historys[player];
+    if history then
+        table.clear(history);
+        historys[player] = nil;
+        objects[player] = nil;
+    end;
+end));
+
+objects.get_history = function(player)
+    return historys[player] or {}
+end;
+
+objects.yrate = function(player)
+    local history = historys[player]
+    if not history or #history < 2 then
+        return nil
+    end
+
+    local latest = history[#history]
+    local previous = history[#history - 1]
+    local dt = latest.timestamp - previous.timestamp
+    if dt <= 1e-4 then
+        return nil
+    end
+
+    local prevLook = Vector3.new(previous.position.LookVector.X, 0, previous.position.LookVector.Z).Unit
+    local latestLook = Vector3.new(latest.position.LookVector.X, 0, latest.position.LookVector.Z).Unit
+    local dot = prevLook:Dot(latestLook)
+    local crossY = prevLook:Cross(latestLook).Y
+    local angle = math.atan2(crossY, dot)
+    return angle / dt
+end
+
+objects.predict_rotation = function(player, dt)
+    local history = historys[player]
+    if not history or #history < 2 then
+        return nil
+    end
+
+    local latest = history[#history]
+    local previous = history[#history - 1]
+    local deltaTime = latest.timestamp - previous.timestamp
+    if deltaTime <= 1e-4 then
+        return nil
+    end
+
+    local prevLook = Vector3.new(previous.position.LookVector.X, 0, previous.position.LookVector.Z).Unit
+    local latestLook = Vector3.new(latest.position.LookVector.X, 0, latest.position.LookVector.Z).Unit
+    local dot = prevLook:Dot(latestLook)
+    local crossY = prevLook:Cross(latestLook).Y
+    local angle = math.atan2(crossY, dot)
+    local angularVelocity = angle / deltaTime
+
+    local predictedAngle = angle + angularVelocity * dt
+    local predictedRotation = CFrame.Angles(0, predictedAngle, 0)
+
+    return predictedRotation, angularVelocity
+end
+
+objects.predict = function(player, dt, opts)
+    local history = historys[player]
+    if not history or #history < 2 then
+        return nil
+    end
+
+    local latest = history[#history]
+    local previous = history[#history - 1]
+
+    local deltaTime = latest.timestamp - previous.timestamp
+    if deltaTime <= 1e-4 then
+        return nil
+    end
+
+    local delta = latest.position.Position - previous.position.Position
+    local velocity = delta / deltaTime
+
+    local predictedPos = latest.position.Position + velocity * dt
+
+    local predicted = CFrame.new(predictedPos)
+
+    local angularVelocity
+
+    if opts.predict_rotation then
+        angularVelocity = objects.yrate(player)
+
+        if angularVelocity then
+            predicted *= latest.position.Rotation *
+                CFrame.Angles(0, angularVelocity * dt, 0)
+        else
+            predicted *= latest.position.Rotation
+        end
+    else
+        predicted *= latest.position.Rotation
+    end
+
+    return predicted,{
+        dt = dt,
+        deltaTime = deltaTime,
+        delta = delta,
+        velocity = velocity,
+        latest = latest.position,
+        previous = previous.position,
+        predictedPos = predictedPos,
+        angularVelocity = angularVelocity,
+    }
+end
+
+objects.our_predicted_position = function()
+    
+    
+    local time = tick() - (Latency:half_ping())
+    local history = historys[local_player.instance]
+
+    table.sort(history, function(a, b)
+        return a.timestamp < b.timestamp
+    end);
+
+    for i = #history,1,-1 do
+        local object = history[i]
+
+        if object.timestamp <= time then
+            return object.position
+        end
+    end
+
+    return local_player.root_part.CFrame
+end
+
+scheduler:add_task(1 / 15):Connect(function()
+    for player, position_player in objects do
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if character and hrp then
+            local position = hrp.CFrame
+            position_player:track(position)
+        end
+    end
+end);
+
+return objects]];
+module_map["src/features/auto-parry/util/target-filter"] = [[
+local TargetFilter = {}
+local reputation_system;
+
+function TargetFilter.get_target_kind(entity: Instance?): string
+	if not entity then
+		return "Unknown"
+	end
+
+	local plr = services.Players:GetPlayerFromCharacter(entity)
+	if plr then
+		return "PVP"
+	end
+
+	if entity.Name and entity.Name:sub(1, 1) == "." then
+		return "PVE"
+	end
+
+	return "Other"
+end
+
+function TargetFilter.is_allowed(entity: Instance?, allowed_targets): boolean
+	
+	if not allowed_targets then
+		return true
+	end
+
+	if aztup_options.filters.Value["Dont Parry If Ally"] and aztup.flags.ally_system then
+		if entity and entity:IsA("Model") then
+			local plr = services.Players:GetPlayerFromCharacter(entity)
+			if plr then
+				local is_ally = false
+
+				
+				if not is_ally
+					and table.find(aztup_options.ally_settings.Value, "Deepwoken Allys")
+					and local_player
+					and local_player.character
+					and (function()
+						if not reputation_system then
+							local modules = services.ReplicatedStorage:WaitForChild("Modules");
+							reputation_system = base_require(modules:WaitForChild("ReputationSystem"));
+						end
+
+						return reputation_system
+					end)()
+					and reputation_system:IsAlly(local_player.character, entity)
+				then 
+					is_ally = true
+				end
+
+				
+				if not is_ally
+					and table.find(aztup_options.ally_settings.Value, "Roblox Friends")
+					and general:is_friends_with_sync(plr)
+				then
+					is_ally = true
+				end
+
+				
+				if not is_ally
+					and table.find(aztup_options.ally_settings.Value, "Custom Players")
+				then
+					local list = tostring(aztup_options.ally_players_input.Value)
+					if #list > 0 then
+						for name in string.gmatch(list, "([^;]+)") do
+							if plr.Name == name:gsub("^%s*(.-)%s*$", "%1") then
+								is_ally = true
+								break
+							end
+						end
+					end
+				end
+
+				
+				if not is_ally
+					and table.find(aztup_options.ally_settings.Value, "Custom Guilds")
+				then
+					local guild = plr:GetAttribute("Guild")
+					if typeof(guild) == "string" and #guild > 0 then
+						local list = tostring(aztup_options.ally_guilds_input.Value)
+						if #list > 0 then
+							for g in string.gmatch(list, "([^;]+)") do
+								if guild == g:gsub("^%s*(.-)%s*$", "%1") then
+									is_ally = true
+									break
+								end
+							end
+						end
+					end
+				end
+
+				
+				if not is_ally
+					and general:is_teammate(plr)
+				then
+					if local_player
+						and local_player.instance
+						and plr
+					then
+						local my_guild = local_player.instance:GetAttribute("Guild")
+						local their_guild = plr:GetAttribute("Guild")
+						if typeof(my_guild) == "string"
+							and #my_guild > 0
+							and my_guild == their_guild
+						then
+							is_ally = true
+						end
+					end
+				end
+
+				if is_ally then
+					return false
+				end
+			end
+		end
+	end;
+
+	if allowed_targets.All then
+		return true
+	end
+
+	local kind = TargetFilter.get_target_kind(entity)
+
+	if kind == "Unknown" then
+		return allowed_targets.Unknown == true
+	end
+
+	if kind == "PVP" then
+		return allowed_targets.PVP == true
+	end
+
+	if kind == "PVE" then
+		return allowed_targets.PVE == true
+	end
+
+	
+	return true
+end
+
+return TargetFilter
+]];
 module_map["src/features/automation/auto_brutus"] = [[
 
 
@@ -45654,6 +55924,34 @@ end;
 loaded_signal:fire(); 
 
 aztup.automation:start(); ]=];
+
+local function list_bundle_modules(pattern)
+  if type(pattern) ~= "string" then
+    return {}
+  end
+
+  local normalized_pattern = pattern:gsub("^@src/", ""):gsub("^src/", "")
+  local lua_pattern = normalized_pattern:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+  lua_pattern = lua_pattern:gsub("%*", ".*")
+  local results = {}
+
+  for module_name in pairs(module_map) do
+    if module_name:sub(1, 13) == "src/features/" then
+      local feature_path = module_name:sub(5)
+      if feature_path:match("^" .. lua_pattern .. "$") then
+        table.insert(results, feature_path)
+      end
+    end
+  end
+
+  table.sort(results)
+  return results
+end
+
+list_modules = list_bundle_modules
+if type(getgenv) == "function" then
+  getgenv().list_modules = list_bundle_modules
+end
 
 local bootstrap_ok, bootstrap_result = xpcall(function()
   return base_require("@src/init")

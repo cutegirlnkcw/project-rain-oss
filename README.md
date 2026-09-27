@@ -28,7 +28,7 @@ node test_bundle_integrity.mjs
 
 The first command writes `dist/project_rain_bundle.lua`. The second compares each bundled module with its source file and checks the generated delimiter boundaries. It is a packaging integrity test, not a Luau syntax check or Roblox runtime test.
 
-The bundler deliberately excludes `src/features/auto-parry/**` and `src/features/loader.lua`. These exclusions mean the generated bundle should not be treated as a complete Deepwoken build without further review. The output logs module load successes and failures during startup.
+The feature loader is restored from a maintainer-provided reference. It enumerates `features/*/*` and excludes the auto-parry data modules and `features/auto-parry/handlers/animator-handler` from feature registration. These modules remain in the bundle for direct dependency requires. The bundler provides a bundle-backed `list_modules` implementation so enumeration works in the single-file build. The output logs module load successes and failures during startup.
 
 ## Runtime Routing
 

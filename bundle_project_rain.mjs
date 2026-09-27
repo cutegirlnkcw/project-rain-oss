@@ -8,12 +8,6 @@ const rootDir = __dirname;
 const srcDir = path.join(rootDir, 'src');
 const distDir = path.join(rootDir, 'dist');
 
-const excludedPrefixes = [
-  'src/features/auto-parry/',
-  'src/features/auto-parry',
-  'src/features/loader.lua',
-];
-
 const includeRootFiles = [
   'globals.lua',
   'luarmor_init_script.lua',
@@ -24,10 +18,6 @@ const moduleMap = new Map();
 
 function toPosix(value) {
   return value.replace(/\\/g, '/');
-}
-
-function isExcluded(relativePath) {
-  return excludedPrefixes.some((prefix) => relativePath === prefix || relativePath.startsWith(prefix));
 }
 
 function walk(dir) {
@@ -47,10 +37,6 @@ function walk(dir) {
     }
 
     const posixRelative = toPosix(path.relative(rootDir, fullPath));
-    if (isExcluded(posixRelative)) {
-      continue;
-    }
-
     const normalized = posixRelative.replace(/^\.?\//, '').replace(/^src\//, 'src/');
     const key = normalized.replace(/\.lua$/, '');
 
@@ -170,6 +156,10 @@ local function base_require(name)
     error("Invalid module name: " .. tostring(name))
     end
 
+  if normalized:sub(1, 9) == "features/" then
+    normalized = "src/" .. normalized
+  end
+
     if module_cache[normalized] ~= nil then
         return module_cache[normalized]
     end
@@ -209,6 +199,34 @@ end
 require = base_require
 
 ${modules.join('\n')}
+
+local function list_bundle_modules(pattern)
+  if type(pattern) ~= "string" then
+    return {}
+  end
+
+  local normalized_pattern = pattern:gsub("^@src/", ""):gsub("^src/", "")
+  local lua_pattern = normalized_pattern:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+  lua_pattern = lua_pattern:gsub("%*", ".*")
+  local results = {}
+
+  for module_name in pairs(module_map) do
+    if module_name:sub(1, 13) == "src/features/" then
+      local feature_path = module_name:sub(5)
+      if feature_path:match("^" .. lua_pattern .. "$") then
+        table.insert(results, feature_path)
+      end
+    end
+  end
+
+  table.sort(results)
+  return results
+end
+
+list_modules = list_bundle_modules
+if type(getgenv) == "function" then
+  getgenv().list_modules = list_bundle_modules
+end
 
 local bootstrap_ok, bootstrap_result = xpcall(function()
   return base_require("@src/init")

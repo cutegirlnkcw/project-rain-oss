@@ -45,6 +45,22 @@ if (!checked) {
   failures.push('no module entries found');
 }
 
+if (!seen.has('src/features/loader')) {
+  failures.push('feature loader is missing from bundle');
+}
+
+if (!seen.has('src/features/auto-parry/auto-parry')) {
+  failures.push('auto-parry feature modules are missing from bundle');
+}
+
+if (!seen.has('src/features/auto-parry/handlers/animator-handler')) {
+  failures.push('animator handler dependency is missing from bundle');
+}
+
+if (![...seen].some((key) => key.startsWith('src/features/auto-parry/data/'))) {
+  failures.push('auto-parry data dependencies are missing from bundle');
+}
+
 const finalModule = bundle.lastIndexOf('module_map[');
 const bootstrap = bundle.indexOf('local bootstrap_ok');
 if (bootstrap < 0 || bootstrap < finalModule) {
