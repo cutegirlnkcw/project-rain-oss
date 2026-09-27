@@ -1,6 +1,7 @@
 # Project Rain OSS Recreation
 
 This repository contains a partial Project Rain source handoff, locally reconstructed compatibility shims, a single-file bundler, and a minimal universal fallback UI. It is not an official complete release, and a successful bundle build does not prove the Deepwoken runtime works.
+I fixed most of the missing shit and remade a bundler if you have any questions dm 5928349213 on discord feel free to use this for anything it's not my script afterall
 
 ## Contents
 
