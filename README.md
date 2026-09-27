@@ -56,3 +56,7 @@ dist/         Generated single-file bundle
 ```
 
 `.luaurc` defines the Luau aliases used by editor tooling.
+
+## Acknowledgments
+
+Thanks to **uni/union/union3425** on Discord for providing the deobfuscated reference used during this recreation.
