@@ -34,7 +34,11 @@ while ((match = modulePattern.exec(bundle)) !== null) {
 
   const original = fs.readFileSync(sourcePath, 'utf8');
   const embedded = bundle.slice(contentStart, contentEnd);
-  const decoded = embedded.startsWith('\n') ? embedded.slice(1) : embedded;
+  const decoded = embedded.startsWith('\r\n')
+    ? embedded.slice(2)
+    : embedded.startsWith('\n')
+      ? embedded.slice(1)
+      : embedded;
   if (decoded !== original) {
     failures.push(`${key}: embedded source differs from ${sourcePath}`);
   }
