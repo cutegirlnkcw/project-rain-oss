@@ -8,12 +8,6 @@ const rootDir = __dirname;
 const srcDir = path.join(rootDir, 'src');
 const distDir = path.join(rootDir, 'dist');
 
-const includeRootFiles = [
-  'globals.lua',
-  'luarmor_init_script.lua',
-  'init.lua',
-];
-
 const moduleMap = new Map();
 
 function toPosix(value) {
@@ -45,66 +39,72 @@ function walk(dir) {
   }
 }
 
-function buildBundleEntries() {
-  const entries = [];
-  const explicit = new Set();
-
-  for (const entry of includeRootFiles) {
-    const file = path.join(srcDir, entry);
-    if (fs.existsSync(file)) {
-      explicit.add('src/' + entry.replace(/^\//, '').replace(/\.lua$/, ''));
-    }
-  }
-
-  for (const key of Array.from(moduleMap.keys()).sort()) {
-    if (!key.startsWith('src/')) continue;
-    if (key === 'src/features/loader') continue;
-    if (key === 'src/init') continue;
-    entries.push(key);
-  }
-
-  const loaderKey = 'src/features/loader';
-  if (moduleMap.has(loaderKey)) {
-    entries.unshift(loaderKey);
-  }
-
-  for (const key of [...explicit].sort()) {
-    if (key !== 'src/init' && !entries.includes(key)) {
-      entries.unshift(key);
-    }
-  }
-
-  if (moduleMap.has('src/init')) {
-    entries.push('src/init');
-  }
-
-  return entries;
+function normalizeModuleName(value) {
+  return value
+    .replace(/\\/g, '/')
+    .replace(/^@src\//, '')
+    .replace(/^src\//, '')
+    .replace(/^\.\//, '')
+    .replace(/\.lua$/, '');
 }
 
-function toLuaLongString(source) {
-  let equals = '';
-  let closingDelimiter = `]${equals}]`;
-  while (
-    source.includes(closingDelimiter)
-    || source.endsWith(closingDelimiter.slice(0, -1))
-  ) {
-    equals += '=';
-    closingDelimiter = `]${equals}]`;
-  }
-
-  return `[${equals}[\n${source}]${equals}]`;
+function patternToRegex(pattern) {
+  const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+  return new RegExp(`^${escaped.replace(/\*/g, '.*')}$`);
 }
 
-function buildBundle() {
+function collectBundleEntries(roots) {
+  const included = new Set();
+  const pending = [...roots];
+
+  while (pending.length > 0) {
+    const moduleName = normalizeModuleName(pending.pop());
+    const key = `src/${moduleName}`;
+    if (included.has(key) || !moduleMap.has(key)) continue;
+    included.add(key);
+
+    const source = moduleMap.get(key);
+    const dependencies = [];
+    const requirePattern = /\brequire\s*\(\s*\(*\s*(?:LPH_ENCSTR\s*\(\s*)?["']([^"']+)["']/g;
+    let match;
+    while ((match = requirePattern.exec(source)) !== null) {
+      const dependency = normalizeModuleName(match[1]);
+      if (moduleMap.has(`src/${dependency}`)) {
+        dependencies.push(dependency);
+      }
+    }
+
+    const moduleListPattern = /\blist_modules\s*\(\s*["']([^"']+)["']\s*\)/g;
+    while ((match = moduleListPattern.exec(source)) !== null) {
+      const relativePattern = normalizeModuleName(match[1]);
+      const regex = patternToRegex(relativePattern);
+      for (const candidate of moduleMap.keys()) {
+        if (candidate.startsWith('src/') && regex.test(candidate.slice(4))) {
+          dependencies.push(candidate.slice(4));
+        }
+      }
+    }
+
+    pending.push(...dependencies);
+  }
+
+  return [...included].sort();
+}
+
+function buildBundle(profile) {
   walk(srcDir);
 
-  const entries = buildBundleEntries();
+  const entries = collectBundleEntries(['init']);
   const modules = [];
 
   for (const key of entries) {
     const code = moduleMap.get(key);
     if (!code) continue;
-    modules.push(`module_map[${JSON.stringify(key)}] = ${toLuaLongString(code)};`);
+    modules.push(`-- BEGIN MODULE: ${key}
+module_map[${JSON.stringify(key)}] = function(require)
+${code}
+end
+-- END MODULE: ${key}`);
   }
 
   const bundle = `-- Project Rain generated bundle
@@ -112,6 +112,7 @@ function buildBundle() {
 
 local module_map = {};
 local module_cache = {};
+local native_require = require;
   local status_log = {
     loaded = {},
     failed = {},
@@ -142,63 +143,62 @@ local function normalize_name(name)
     end
 
     local normalized = name:gsub("\\\\", "/")
-    normalized = normalized:gsub("^@src/", "src/")
-    normalized = normalized:gsub("^src/", "src/")
+    normalized = normalized:gsub("^@src/", "")
+    normalized = normalized:gsub("^src/", "")
     normalized = normalized:gsub("^%./", "")
     normalized = normalized:gsub("%.lua$", "")
     return normalized
 end
 
-local function base_require(name)
+local function builder_require(name)
+    if type(name) ~= "string" then
+        return native_require(name)
+    end
+
     local normalized = normalize_name(name)
     if not normalized then
     notify_status("failed", tostring(name), "invalid module name")
     error("Invalid module name: " .. tostring(name))
     end
 
-  if normalized:sub(1, 9) == "features/" then
-    normalized = "src/" .. normalized
-  end
+    local module_name = "src/" .. normalized
 
-    if module_cache[normalized] ~= nil then
-        return module_cache[normalized]
+    if module_cache[module_name] ~= nil then
+        return module_cache[module_name]
     end
 
-    local source = module_map[normalized]
-    if not source then
-    notify_status("failed", normalized, "missing module")
-    error("Missing module: " .. tostring(name) .. " -> " .. tostring(normalized))
-    end
-
-    local chunk = loadstring or load
-    local ok, func, compile_error = pcall(function()
-        return chunk(source, normalized)
-    end)
-
-    if not ok or type(func) ~= "function" then
-      notify_status("failed", normalized, tostring(compile_error or func or "compile error"))
-    error("Failed to compile module: " .. tostring(normalized))
+    local module_function = module_map[module_name]
+    if type(module_function) ~= "function" then
+        notify_status("failed", module_name, "missing bundled module")
+        error("Missing bundled module: " .. tostring(name) .. " -> " .. module_name)
     end
 
   local success, result = xpcall(function()
-    return func()
+    return module_function(builder_require)
   end, function(err)
     return err
   end)
 
   if not success then
-    notify_status("failed", normalized, tostring(result))
-    error("Failed to execute module: " .. tostring(normalized) .. " | " .. tostring(result))
+    notify_status("failed", module_name, tostring(result))
+    error("Failed to execute module: " .. module_name .. " | " .. tostring(result))
   end
 
-  module_cache[normalized] = result
-  notify_status("loaded", normalized, "module executed successfully")
+  module_cache[module_name] = result
+  notify_status("loaded", module_name, "module executed successfully")
   return result
 end
 
-require = base_require
+if type(getgenv) == "function" then
+    getgenv().builder_require = builder_require
+    getgenv().script_require = builder_require
+end
 
 ${modules.join('\n')}
+
+if type(getgenv) == "function" then
+  getgenv().PROJECT_RAIN_BUNDLE_PROFILE = "${profile}"
+end
 
 local function list_bundle_modules(pattern)
   if type(pattern) ~= "string" then
@@ -211,10 +211,10 @@ local function list_bundle_modules(pattern)
   local results = {}
 
   for module_name in pairs(module_map) do
-    if module_name:sub(1, 13) == "src/features/" then
-      local feature_path = module_name:sub(5)
-      if feature_path:match("^" .. lua_pattern .. "$") then
-        table.insert(results, feature_path)
+    if module_name:sub(1, 4) == "src/" then
+      local relative_path = module_name:sub(5)
+      if relative_path:match("^" .. lua_pattern .. "$") then
+        table.insert(results, relative_path)
       end
     end
   end
@@ -223,13 +223,12 @@ local function list_bundle_modules(pattern)
   return results
 end
 
-list_modules = list_bundle_modules
 if type(getgenv) == "function" then
   getgenv().list_modules = list_bundle_modules
 end
 
 local bootstrap_ok, bootstrap_result = xpcall(function()
-  return base_require("@src/init")
+  return builder_require("@src/init")
 end, function(err)
   return err
 end)
@@ -255,11 +254,19 @@ end
 `;
 
   fs.mkdirSync(distDir, { recursive: true });
-  const bundlePath = path.join(distDir, 'project_rain_bundle.lua');
+  const fileName = profile === 'universal'
+    ? 'project_rain_universal.lua'
+    : 'project_rain_bundle.lua';
+  const bundlePath = path.join(distDir, fileName);
   fs.writeFileSync(bundlePath, bundle);
-  return bundlePath;
+  const manifestPath = path.join(distDir, fileName.replace(/\.lua$/, '.modules.txt'));
+  fs.writeFileSync(manifestPath, `${entries.join('\n')}\n`);
+  return { bundlePath, manifestPath, moduleCount: entries.length };
 }
 
-const bundlePath = buildBundle();
+const profile = process.argv.includes('--universal') ? 'universal' : 'full';
+const { bundlePath, manifestPath, moduleCount } = buildBundle(profile);
+console.log('Bundle profile:', profile);
 console.log('Bundle generated:', bundlePath);
-console.log('Modules bundled:', Array.from(moduleMap.keys()).length);
+console.log('Module list generated:', manifestPath);
+console.log('Modules bundled:', moduleCount);

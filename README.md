@@ -13,7 +13,8 @@ I fixed most of the missing shit and remade a bundler if you have any questions 
 - `assets/` contains data and project assets.
 - `bundle_project_rain.mjs` builds the single-file bundle.
 - `dist/project_rain_bundle.lua` is the generated bundle.
-- `test_bundle_integrity.mjs` checks embedded source text, long-string delimiters, duplicate module entries, and bootstrap ordering.
+- `dist/project_rain_bundle.modules.txt` lists every module included in the full bundle; the universal profile has a matching `dist/project_rain_universal.modules.txt` manifest.
+- `test_bundle_integrity.mjs` checks function-wrapped module source, duplicate entries, manifests, and bootstrap ordering. Bundled modules are invoked as functions; the module loader does not compile source with `loadstring`.
 
 ## Build
 
@@ -26,13 +27,24 @@ node bundle_project_rain.mjs
 node test_bundle_integrity.mjs
 ```
 
-The first command writes `dist/project_rain_bundle.lua`. The second compares each bundled module with its source file and checks the generated delimiter boundaries. It is a packaging integrity test, not a Luau syntax check or Roblox runtime test.
+The default `full` profile writes `dist/project_rain_bundle.lua`. It includes the dynamically loaded Deepwoken feature, UI, and automation modules.
+
+To build the universal profile, run:
+
+```powershell
+node bundle_project_rain.mjs --universal
+node test_bundle_integrity.mjs dist/project_rain_universal.lua
+```
+
+This writes `dist/project_rain_universal.lua`. It contains the same complete runtime modules as the full profile. On supported Deepwoken places it follows the normal Deepwoken startup; on other places it opens the two-tab universal fallback. The universal profile has a separate filename for choosing the routing behavior, not a smaller module set.
+
+The integrity test compares each bundled function body with its source file and checks module manifests and profile contents. It is a packaging test, not a Luau syntax check or Roblox runtime test.
 
 The feature loader is restored from a maintainer-provided reference. It enumerates `features/*/*` and excludes the auto-parry data modules and `features/auto-parry/handlers/animator-handler` from feature registration. These modules remain in the bundle for direct dependency requires. The bundler provides a bundle-backed `list_modules` implementation so enumeration works in the single-file build. The output logs module load successes and failures during startup.
 
 ## Runtime Routing
 
-`src/init.lua` contains the supported-place allowlist. For a place outside that list, startup initializes the bundled universal fallback and returns before the Deepwoken-specific runtime. The fallback uses the bundled Project Rain UI library, offers the library's keybind and UI-scale controls, and attempts to include its existing config and theme controls. Those managers depend on executor filesystem APIs; they report a warning if setup fails. The two Universal-tab toggles are placeholders and intentionally have no game effect.
+`src/init.lua` contains the supported-place allowlist. Supported places use the normal Deepwoken startup in either profile. Other places initialize the bundled universal fallback and return before the Deepwoken-specific runtime. The fallback uses the bundled Project Rain UI library, offers the library's keybind and UI-scale controls, and attempts to include its existing config and theme controls. Those managers depend on executor filesystem APIs; they report a warning if setup fails. The two Universal-tab toggles are placeholders and intentionally have no game effect.
 
 A supported place proceeds into the Deepwoken runtime, which depends on Roblox game internals and executor-provided APIs. A normal Roblox client is not sufficient. Only use this code in an environment and context where you are authorized to run it, and follow the game's and platform's rules.
 
@@ -41,7 +53,7 @@ A supported place proceeds into the Deepwoken runtime, which depends on Roblox g
 - This was an intentionally incomplete source release. Some source files and original startup behavior were omitted.
 - `src/luarmor_init_script.lua`, `src/features/loader.lua`, `src/features/generic_feature.lua`, and several compatibility files in this checkout are local reconstructions or compatibility implementations, not verified original source.
 - The bundler's successful exit and the integrity test confirm packaging consistency only. This repository does not currently include an automated Luau parser or a Roblox runtime test harness.
-- The universal fallback does not provide universal gameplay features. It is a small UI-only path for non-allowlisted places.
+- The universal fallback does not provide universal gameplay features. It is a small UI-only path for non-allowlisted places; the universal profile still includes the full runtime so it can run normally in Deepwoken.
 - The committed `dist/project_rain_bundle.lua` is generated output. Edit source and rerun the bundler rather than editing the generated bundle by hand.
 
 ## Repository Layout
@@ -49,6 +61,8 @@ A supported place proceeds into the Deepwoken runtime, which depends on Roblox g
 ```text
 assets/       Project data and assets
 src/          Luau source
+  globals.lua Global preamble and shared service/module setup
+  init.lua    Main runtime entry point (this checkout has no src/main.lua)
   automation/ Automation modules
   features/   Feature implementations and registry
   ui/         Main UI setup and tabs

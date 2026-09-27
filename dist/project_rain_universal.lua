@@ -56513,7 +56513,7 @@ end
 -- END MODULE: src/utility/webhook
 
 if type(getgenv) == "function" then
-  getgenv().PROJECT_RAIN_BUNDLE_PROFILE = "full"
+  getgenv().PROJECT_RAIN_BUNDLE_PROFILE = "universal"
 end
 
 local function list_bundle_modules(pattern)
