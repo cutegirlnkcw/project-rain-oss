@@ -61,3 +61,21 @@ dist/         Generated single-file bundle
 ## Acknowledgments
 
 Thanks to uni for making such an awesome script and community <3 
+Extra thanks to the people uni acknowledged in the discord annc
+
+
+    Huge thanks to:
+        Blastbrean (for the Lycoris-Rewrite aspects reused & introducing me to the concept of bundling & early inspirations & PascalCase helping me figure out some aspects of AP + more), & the rest of the team.
+        Basil (co-owner, ex-staff manager & manager who oversees for the product & big motivator).
+        Hon (did all the timings before rewrite & alot of timings for rewrite & helps with resellers).
+        TempedOut, Soggy, Hon, Mint, Juan, Joseph, Q/2qrys for various work on the dev team.
+        Early on testers, (& kendu), + the staff team
+        V15/'VermillionIts15' (only reason the product is public, made 'Vermillion Hub', which got passed to citam & advertised + helped in very early stages of V1 & 'mist hub')
+        Ken/Winter (worked with me on 'Wave Hub', which was a rewrite of PR for the executor under the same names hub circa 2025)
+        ILikeBananas69 (Early on inspiration to start development, helped with styling some early code & a old bedwars script)
+        2qrys (early on help, now works on rogueblox, <3 even if you hate me now & we had our past mistakes)
+        Wowzers (contributed heavily to the script & was a great friend)
+        Citam (helped heavily back in the day)
+        yv5 (slight help in certain aspects)
+
+
