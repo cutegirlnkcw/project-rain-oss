@@ -1,9 +1,53 @@
 
 local luarmor_finish_tick = tick();
-require("@src/luarmor_init_script");
+local luarmor_ok, luarmor_error = pcall(function()
+    require("@src/luarmor_init_script");
+end);
+
+if not luarmor_ok then
+    warn("[init] luarmor bootstrap unavailable; using fallback compatibility shims");
+    getgenv().Feature = getgenv().Feature or require("@src/features/generic_feature");
+    getgenv().list_modules = getgenv().list_modules or function()
+        return {};
+    end;
+end;
+
+local globals_ok, globals_error = pcall(function()
+    require("@src/globals");
+end);
+
+if not globals_ok then
+    error("[init] failed to initialize shared globals: " .. tostring(globals_error));
+end;
 
 if not game:IsLoaded() then
     repeat task.wait() until game:IsLoaded();
+end;
+
+local supported_place_ids = {
+    [4111023553] = true,
+    [5735553160] = true,
+    [6032399813] = true,
+    [6473861193] = true,
+    [6832944305] = true,
+    [8668476218] = true,
+    [86761619761103] = true,
+    [13891478131] = true,
+};
+
+if not supported_place_ids[game.PlaceId] then
+    warn(string.format("[Project Rain bundle] unsupported place %s; starting universal fallback", tostring(game.PlaceId)));
+    local fallback_ok, fallback_result = pcall(function()
+        return require("@src/universal_fallback").initialize();
+    end);
+
+    if fallback_ok and fallback_result then
+        print("[Project Rain bundle] universal fallback loaded: Settings and Universal tabs");
+    else
+        warn("[Project Rain bundle] universal fallback failed: " .. tostring(fallback_result));
+    end
+
+    return true;
 end;
 
 if getgenv().metamorphosis then
@@ -299,7 +343,10 @@ env.ab_builder = require("@src/features/auto-builder/auto_builder");
 aztup.automation.initialize();
 
 require(("@src/features/auto-parry/block-input-manager"))
-require(("@src/features/loader")).initialize();
+local feature_loader = require(("@src/features/loader"));
+if feature_loader and feature_loader.initialize then
+    feature_loader:initialize();
+end;
 task.spawn(pcall, function() 
     require(LPH_ENCSTR("@src/features/auto-parry/handlers/animator-handler"));
 end)
