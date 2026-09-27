@@ -62,9 +62,7 @@ dist/         Generated single-file bundle
 
 Thanks to uni for making such an awesome script and community <3 
 Extra thanks to the people uni acknowledged in the discord annc
-credits to TempedOut, Soggy, Hon, Mint, Juan, Joseph, Q/2qrys & me if you release a fork that is paid or rebrand the script (or use significant parts of the script).
-
-    Huge thanks to:
+credits to TempedOut, Soggy, Hon, Mint, Juan, Joseph, Q/2qrys & me
         Blastbrean (for the Lycoris-Rewrite aspects reused & introducing me to the concept of bundling & early inspirations & PascalCase helping me figure out some aspects of AP + more), & the rest of the team.
         Basil (co-owner, ex-staff manager & manager who oversees for the product & big motivator).
         Hon (did all the timings before rewrite & alot of timings for rewrite & helps with resellers).
